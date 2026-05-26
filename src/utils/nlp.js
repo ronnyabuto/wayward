@@ -165,7 +165,7 @@ Commands:
   (a) Ready to leave: "I'm done with work", "heading home", "leaving soon", "is traffic bad now?", "should I go now?"
   (b) Arrival deadline: "I want to be at X before 6pm", "I need to be seated by 7", "I have a 9am meeting", "will I make it by 8 if I leave now?", "when should I leave to arrive before X?"
   Set arrive_by to the deadline (HH:MM 24-hour) when the user states one; null for case (a).
-- "setplace": user is saving a location. Use when they declare where their home, work, or any named place is (e.g. "my home is at X", "save my work as Y", "I live in Z").
+- "setplace": user is saving a location. Use ONLY when they explicitly declare a place with words like "my home is", "save my work as", "I live at", "set home to", etc. Do NOT use setplace when the user simply states a location as their current position or as an answer to "where are you leaving from?" — that is an origin for a routing command, not a place to save.
 - "scenic": user wants the most scenic driving route between two places.
 - "matatu": user is asking about public transit / matatu conditions on a road corridor. Use when they mention "matatu", "mat", "route [number]", "stage", or ask about public transport. Set route_number if they specify one (e.g., "Route 23" → "23"); set origin/destination if they name the corridor; set both if possible.
 - "unknown": cannot confidently determine intent or locations. Set clarification to a short, specific question.
@@ -183,6 +183,7 @@ Key distinctions:
 - "will I make it to JKIA by 8?" → "depart" with arrive_by "08:00"
 - "I need to get there in the next 45 minutes" → "depart" with arrive_by = current time + 45 min as HH:MM
 - "my home is at Seresponda Court" → "setplace" with place_name "home" and place_address "Seresponda Court"
+- Prior turn was depart with origin=null, user replies "Jalde apartments in OJ, bypass (ruiru)" → depart, origin="Jalde Apartments, OJ, Ruiru, Kenya", destination=(carry forward), arrive_by=(carry forward). Never setplace.
 - "how thika road looking right now from kahawa sukari to cbd?" → check, origin="Kahawa Sukari, Nairobi, Kenya", destination="Nairobi CBD, Kenya", corridor="Thika Road"
 - "Ngong Road traffic from Karen to town" → check, origin="Karen, Nairobi, Kenya", destination="Nairobi CBD, Kenya", corridor="Ngong Road"
 - "matatu on Mombasa Road from EPZ to CBD" → matatu, origin="Export Processing Zone, Athi River, Kenya", destination="Nairobi CBD, Kenya", corridor="Mombasa Road"
@@ -205,7 +206,8 @@ Conversation context:
 - When the user changes only one location ("go to X instead", "from Y instead"), carry the unchanged location forward from the prior turn exactly as it appeared — do not ask about it again.
 - Always produce complete, unambiguous origin and destination values in your output for routing commands.
 - Do NOT carry forward pronouns ("there", "it", "that place") or unresolved saved-place aliases — resolve them fully or return unknown.
-- If one location is already known from context and the other is ambiguous or unrecognisable, return unknown and ask specifically about the ambiguous location only. Do not claim ignorance of the location you already have from context.`;
+- If one location is already known from context and the other is ambiguous or unrecognisable, return unknown and ask specifically about the ambiguous location only. Do not claim ignorance of the location you already have from context.
+- If the prior turn was a routing command (check/depart/watch) with a null origin or destination, and the user's current message is just a location name or address, treat it as filling in the missing field for that same command. Do NOT classify it as setplace.`;
 
 // Parse the quota error body to distinguish per-minute vs per-day exhaustion and
 // extract the retry delay. Using quotaId is reliable — the API returns ~60s retryDelay
