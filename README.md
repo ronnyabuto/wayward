@@ -14,7 +14,7 @@ NLP runs two layers. A regex pre-filter handles unambiguous "X to Y" patterns �
 
 Conversation history is persisted to SQLite. Retrieval is a hybrid: the 5 most recent turns always included, older turns surfaced by FTS5 keyword match scored by temporal decay. "What about from Westlands instead?" works across restarts. The FTS index stays in sync via SQLite triggers, not application code.
 
-One thing that doesn't scale: routes are keyed on the raw NLP-extracted place name string. Two users spelling the same place differently accumulate separate history. Fine for now — would need a coordinate-based canonical key at scale.
+Places are canonicalised to Google place IDs at geocode time, so "Sarit Centre, Westlands" and "Sarit Centre, Westlands, Nairobi, Kenya" converge to the same key regardless of how the model phrased them. Traffic observations write to both a personal history (keyed by user) and an anonymised shared pool (keyed by place ID pair). New routes show community averages from day one instead of falling back to the static baseline.
 
 ---
 
@@ -32,7 +32,7 @@ how long from Karen to Westlands?
   https://maps.google.com/...
 ```
 
-Once you have three or more trips on the same route at the same day/hour slot, responses compare against your personal average rather than the Google baseline.
+Once you have three or more trips on the same route at the same day/hour slot, responses compare against your personal average. Before that, the community average from other users on the same route is shown instead.
 
 **Check matatu corridor conditions**
 
@@ -146,6 +146,10 @@ npm start
 Long polling — no webhook, no public URL needed.
 
 SQLite database is created at `data/wayward.db` on first run. Watches and saved places persist across restarts.
+
+**Dead man's switch (optional)**
+
+Set `HEALTHCHECK_UUID` to a [Healthchecks.io](https://healthchecks.io) check UUID. The bot pings it after every scheduler cycle; configure an alert channel there (Telegram, email) and you'll be notified if the process stops running.
 
 **Multiple Gemini keys (optional)**
 
