@@ -1,3 +1,5 @@
+import { logger } from './logger.js';
+
 // Regex pre-filter: classifies unambiguous messages before touching Gemini.
 // Returns { command, origin, destination, route_number } or null when uncertain.
 // Handles the ~60% of messages that follow simple "X to Y" patterns.
@@ -192,7 +194,7 @@ Key distinctions:
 - "matatu on Mombasa Road from EPZ to CBD" → matatu, origin="Export Processing Zone, Athi River, Kenya", destination="Nairobi CBD, Kenya", corridor="Mombasa Road"
 
 Other rules:
-- origin and destination: most precise, correctly spelled place names including neighbourhood and city (e.g. "Seresponda Court, Kileleshwa, Nairobi, Kenya"). Never invent a place.
+- origin and destination: Output in the format "<POI or address>, <neighbourhood>, <city>, Kenya". Always include city and country. Omit neighbourhood only if unknown. No abbreviations, no trailing punctuation. Examples: "Sarit Centre, Westlands, Nairobi, Kenya"; "JKIA, Embakasi, Nairobi, Kenya"; "Garden City Mall, Thika Road, Nairobi, Kenya"; "Mombasa CBD, Mombasa, Kenya". Never invent a place.
 - threshold: only for "watch". Between 1 and 300. If user says "by 7am", subtract current time; if result ≤ 0 or > 300, return "unknown".
 - arrive_by: only for "depart" when the user names an arrival time or deadline. Rules:
   - AM/PM ambiguity: if no am/pm is stated, infer the next upcoming occurrence from current time. "by 7" at 6 PM → "19:00". "by 7" at 6 AM → "07:00". "by 7" at 11 PM → "07:00" (next morning, but still return "07:00").
@@ -314,7 +316,7 @@ export async function parseIntent(userMessage, savedPlaces = {}, conversationHis
       if (isPerDay) {
         keyIndex = i + 1;
         if (i < GEMINI_KEYS.length - 1) {
-          console.warn(`[Gemini] Key ${i + 1}/${GEMINI_KEYS.length} hit daily quota — rotating to key ${i + 2}.`);
+          logger.warn({ keyIndex: i + 1, total: GEMINI_KEYS.length }, 'Gemini key hit daily quota — rotating');
           continue;
         }
         throw new Error(`All ${GEMINI_KEYS.length} Gemini key(s) have exhausted their daily quota.`);

@@ -15,9 +15,12 @@ const ENDPOINT = 'https://routes.googleapis.com/directions/v2:computeRoutes';
 //                  is a vague city-level label (e.g. "Nairobi, Kenya" for a specific POI).
 //   string       — address string; used by the scheduler and watch poller which only have
 //                  the NLP-extracted string stored in the DB.
+// Routes API accepts placeId directly and documents it as preferred — it resolves
+// driveway access points and traffic variables more accurately than lat/lng snapping.
 function toRoutesLocation(input) {
-  if (input && typeof input === 'object' && 'lat' in input) {
-    return { location: { latLng: { latitude: input.lat, longitude: input.lon } } };
+  if (input && typeof input === 'object') {
+    if (input.placeId) return { placeId: input.placeId };
+    if ('lat' in input) return { location: { latLng: { latitude: input.lat, longitude: input.lon } } };
   }
   return { address: input };
 }

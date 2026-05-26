@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getNairobiComponents } from './utils/time.js';
+import { logger } from './utils/logger.js';
 
 const DATA_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'data');
 const DB_PATH = join(DATA_DIR, 'wayward.db');
@@ -16,6 +17,8 @@ export function initDb() {
   // WAL mode: better write throughput for frequent traffic logging.
   db.pragma('journal_mode = WAL');
   db.pragma('synchronous = NORMAL');
+  // Prevents SQLITE_BUSY if two async operations race for a write lock in the same process.
+  db.pragma('busy_timeout = 5000');
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS watches (
@@ -98,7 +101,132 @@ export function initDb() {
 
     CREATE INDEX IF NOT EXISTS idx_dep_lookup
       ON departure_events (user_id, origin, destination, day_of_week);
+
+    -- Canonical place registry: Google place_id is permanently cacheable per ToS.
+    -- One row per physical place; identified by Google's stable place_id string.
+    CREATE TABLE IF NOT EXISTS places (
+      place_id     TEXT    PRIMARY KEY,
+      display_name TEXT    NOT NULL,
+      lat          REAL    NOT NULL,
+      lon          REAL    NOT NULL,
+      refreshed_at INTEGER NOT NULL
+    );
+
+    -- Geocode cache: maps a normalised query string → place_id.
+    -- Many query strings can resolve to the same place_id without conflict.
+    -- cached_at tracks when lat/lon was last fetched (30-day ToS limit for coordinates).
+    CREATE TABLE IF NOT EXISTS place_queries (
+      queried_as TEXT    PRIMARY KEY,
+      place_id   TEXT    NOT NULL,
+      cached_at  INTEGER NOT NULL
+    );
+
+    -- Anonymised, shared traffic observations pooled across all users.
+    -- AUTOINCREMENT id (not composite PK) so concurrent writes within the same
+    -- second are never silently dropped by INSERT OR IGNORE.
+    CREATE TABLE IF NOT EXISTS traffic_pool (
+      id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+      origin_place_id      TEXT    NOT NULL,
+      destination_place_id TEXT    NOT NULL,
+      day_of_week          INTEGER NOT NULL,
+      hour_slot            INTEGER NOT NULL,
+      duration_sec         INTEGER NOT NULL,
+      recorded_at          INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pool_lookup
+      ON traffic_pool (origin_place_id, destination_place_id, day_of_week, hour_slot, recorded_at);
   `);
+
+  // Migrate traffic_pool: if it was created without the id column (old composite PK),
+  // recreate it. This only affects installs from today before this fix.
+  const poolHasId = db.prepare(
+    `SELECT COUNT(*) AS n FROM pragma_table_info('traffic_pool') WHERE name = 'id'`
+  ).get().n;
+  if (!poolHasId) {
+    db.exec(`DROP TABLE IF EXISTS traffic_pool`);
+    db.exec(`
+      CREATE TABLE traffic_pool (
+        id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+        origin_place_id      TEXT    NOT NULL,
+        destination_place_id TEXT    NOT NULL,
+        day_of_week          INTEGER NOT NULL,
+        hour_slot            INTEGER NOT NULL,
+        duration_sec         INTEGER NOT NULL,
+        recorded_at          INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_pool_lookup
+        ON traffic_pool (origin_place_id, destination_place_id, day_of_week, hour_slot, recorded_at);
+    `);
+  }
+
+  // Migrate watches table: add place_id columns if this is an existing install.
+  const watchCols = new Set(
+    db.prepare(`SELECT name FROM pragma_table_info('watches')`).all().map(r => r.name)
+  );
+  if (!watchCols.has('origin_place_id')) db.exec(`ALTER TABLE watches ADD COLUMN origin_place_id TEXT`);
+  if (!watchCols.has('dest_place_id'))   db.exec(`ALTER TABLE watches ADD COLUMN dest_place_id TEXT`);
+
+  logger.info('Database initialised.');
+}
+
+// ── Places & geocode cache ────────────────────────────────────────────────────
+
+export function dbGetOrCreatePlace(placeId, displayName, lat, lon) {
+  db.prepare(`
+    INSERT INTO places (place_id, display_name, lat, lon, refreshed_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(place_id) DO UPDATE SET
+      display_name = excluded.display_name,
+      lat          = excluded.lat,
+      lon          = excluded.lon,
+      refreshed_at = excluded.refreshed_at
+  `).run(placeId, displayName, lat, lon, Math.floor(Date.now() / 1000));
+}
+
+export function dbCacheQuery(queriedAs, placeId) {
+  db.prepare(`
+    INSERT INTO place_queries (queried_as, place_id, cached_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(queried_as) DO UPDATE SET
+      place_id  = excluded.place_id,
+      cached_at = excluded.cached_at
+  `).run(queriedAs, placeId, Math.floor(Date.now() / 1000));
+}
+
+// Returns { place_id, display_name, lat, lon, refreshed_at } or null.
+export function dbFindPlaceByQuery(queriedAs) {
+  return db.prepare(`
+    SELECT p.place_id, p.display_name, p.lat, p.lon, p.refreshed_at
+    FROM place_queries pq
+    JOIN places p ON p.place_id = pq.place_id
+    WHERE pq.queried_as = ?
+  `).get(queriedAs) ?? null;
+}
+
+// ── Traffic pool (anonymised, shared across users) ────────────────────────────
+
+export function dbLogTrafficPool(originPlaceId, destPlaceId, durationSec) {
+  const { dayOfWeek, hourOfDay } = getNairobiComponents();
+  db.prepare(`
+    INSERT INTO traffic_pool
+      (origin_place_id, destination_place_id, day_of_week, hour_slot, duration_sec, recorded_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(originPlaceId, destPlaceId, dayOfWeek, hourOfDay, durationSec, Math.floor(Date.now() / 1000));
+}
+
+// Returns { avgMin, count } from pooled community data, or null if < 3 observations.
+export function dbGetPoolTypical(originPlaceId, destPlaceId, dayOfWeek, hourOfDay) {
+  const thirtyDaysAgo = Math.floor(Date.now() / 1000) - 30 * 24 * 60 * 60;
+  const row = db.prepare(`
+    SELECT ROUND(AVG(duration_sec) / 60.0) AS avg_min, COUNT(*) AS count
+    FROM traffic_pool
+    WHERE origin_place_id = ? AND destination_place_id = ?
+      AND day_of_week = ? AND hour_slot = ?
+      AND recorded_at > ?
+  `).get(originPlaceId, destPlaceId, dayOfWeek, hourOfDay, thirtyDaysAgo);
+  if (!row || row.count < 3) return null;
+  return { avgMin: Math.round(row.avg_min), count: row.count };
 }
 
 // ── Watches ──────────────────────────────────────────────────────────────────
@@ -107,10 +235,10 @@ export function dbGetAllWatches() {
   return db.prepare('SELECT * FROM watches').all();
 }
 
-export function dbInsertWatch(chatId, origin, destination, thresholdMinutes) {
+export function dbInsertWatch(chatId, origin, destination, thresholdMinutes, originPlaceId = null, destPlaceId = null) {
   const { lastInsertRowid } = db
-    .prepare('INSERT INTO watches (chat_id, origin, destination, threshold_min) VALUES (?, ?, ?, ?)')
-    .run(chatId, origin, destination, thresholdMinutes);
+    .prepare('INSERT INTO watches (chat_id, origin, destination, threshold_min, origin_place_id, dest_place_id) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(chatId, origin, destination, thresholdMinutes, originPlaceId, destPlaceId);
   return Number(lastInsertRowid);
 }
 
@@ -185,7 +313,7 @@ export function dbRetrieveRelevantTurns(userId, queryText) {
 
   let ftsTurns = [];
   try {
-    const sanitized = queryText.replace(/[^a-zA-Z0-9 ]/g, ' ').trim();
+    const sanitized = queryText.replace(/[^\p{L}\p{N} ]/gu, ' ').trim();
     if (sanitized.length > 0) {
       ftsTurns = db.prepare(`
         SELECT m.id, m.user_msg, m.bot_intent, m.created_at, -rank AS fts_score

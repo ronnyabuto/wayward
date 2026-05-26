@@ -1,5 +1,6 @@
 import { getAlternativeRoutes, scoreAndRank, extractWaypoints, buildMapsLink } from '../services/scenic.js';
 import { geocode, GeocodeNotFoundError } from '../utils/geocode.js';
+import { logger } from '../utils/logger.js';
 
 // Core logic — shared by the explicit /scenic command and the NLP path in bot.js.
 export async function handleScenic(bot, chatId, originStr, destinationStr) {
@@ -17,7 +18,7 @@ export async function handleScenic(bot, chatId, originStr, destinationStr) {
     if (err instanceof GeocodeNotFoundError) {
       await bot.sendMessage(chatId, err.message);
     } else {
-      console.error('Geocoding error:', err.message);
+      logger.error({ err, chatId }, 'scenic geocode error');
       await bot.sendMessage(chatId, 'Something went wrong looking up those places. Try again in a moment.');
     }
     return;
@@ -27,7 +28,7 @@ export async function handleScenic(bot, chatId, originStr, destinationStr) {
   try {
     routes = await getAlternativeRoutes(origin, destination);
   } catch (err) {
-    console.error('ORS error:', err.message);
+    logger.error({ err, chatId }, 'ORS error');
     if (err.orsCode === 2010) {
       await bot.sendMessage(chatId, "I couldn't find a drivable road near one of those locations. Try a nearby street or landmark instead.");
     } else if (err.orsCode === 2004) {
@@ -47,7 +48,7 @@ export async function handleScenic(bot, chatId, originStr, destinationStr) {
   try {
     best = await scoreAndRank(routes);
   } catch (err) {
-    console.error('Scoring error:', err.message);
+    logger.error({ err, chatId }, 'scenic scoring error');
     await bot.sendMessage(chatId, 'Something went wrong scoring routes. Try again in a moment.');
     return;
   }

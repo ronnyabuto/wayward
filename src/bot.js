@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import TelegramBot from 'node-telegram-bot-api';
+import { logger } from './utils/logger.js';
 import { registerStopwatch, registerListWatches, handleWatch } from './commands/watch.js';
 import { handleScenic } from './commands/scenic.js';
 import { handleCheck } from './commands/check.js';
@@ -14,7 +15,7 @@ const { TELEGRAM_BOT_TOKEN } = process.env;
 
 
 if (!TELEGRAM_BOT_TOKEN) {
-  console.error('Missing TELEGRAM_BOT_TOKEN. Copy .env.example → .env and fill it in.');
+  logger.fatal('Missing TELEGRAM_BOT_TOKEN. Copy .env.example → .env and fill it in.');
   process.exit(1);
 }
 
@@ -101,7 +102,7 @@ bot.on('message', async (msg) => {
     try {
       intent = await parseIntent(text, savedPlaces, history);
     } catch (err) {
-      console.error('Gemini error:', err.message);
+      logger.error({ err, chatId }, 'Gemini intent parse error');
       await bot.sendMessage(chatId, 'Something went wrong understanding that. Try again in a moment.');
       return;
     }
@@ -189,12 +190,12 @@ bot.on('message', async (msg) => {
       await handleScenic(bot, chatId, intent.origin, intent.destination);
     }
   } catch (err) {
-    console.error('Message handler error:', err.message);
+    logger.error({ err, chatId: msg?.chat?.id }, 'message handler error');
   }
 });
 
 bot.on('polling_error', (err) => {
-  console.error('Polling error:', err.message);
+  logger.error({ err }, 'Telegram polling error');
 });
 
-console.log('Wayward is running.');
+logger.info('Wayward is running.');

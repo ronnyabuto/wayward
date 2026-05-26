@@ -1,5 +1,6 @@
 import { getRouteOptions } from '../services/traffic.js';
 import { geocode, GeocodeNotFoundError } from '../utils/geocode.js';
+import { logger } from '../utils/logger.js';
 
 // Matatu road condition labels derived from car traffic congestion ratios.
 // Framed as what a matatu passenger would experience, not a driver.
@@ -21,7 +22,7 @@ export async function handleMatatu(bot, chatId, originStr, destinationStr) {
     if (err instanceof GeocodeNotFoundError) {
       await bot.sendMessage(chatId, err.message);
     } else {
-      console.error('Matatu geocode error:', err.message);
+      logger.error({ err, chatId }, 'matatu geocode error');
       await bot.sendMessage(chatId, 'Something went wrong looking up those places. Try again in a moment.');
     }
     return;
@@ -31,7 +32,7 @@ export async function handleMatatu(bot, chatId, originStr, destinationStr) {
   try {
     routes = await getRouteOptions(origin, destination);
   } catch (err) {
-    console.error('Matatu traffic error:', err.message);
+    logger.error({ err, chatId }, 'matatu traffic error');
     await bot.sendMessage(chatId, 'Could not fetch road conditions right now. Try again in a moment.');
     return;
   }

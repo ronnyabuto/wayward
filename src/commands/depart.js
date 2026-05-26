@@ -1,8 +1,9 @@
 import { getDurationSeconds } from '../services/traffic.js';
 import { geocode, GeocodeNotFoundError } from '../utils/geocode.js';
 import { commitWatch } from './watch.js';
-import { dbLogTraffic, dbGetPersonalTypical } from '../db.js';
+import { dbLogTraffic, dbGetPersonalTypical, dbLogTrafficPool, dbGetPoolTypical } from '../db.js';
 import { getNairobiComponents } from '../utils/time.js';
+import { logger } from '../utils/logger.js';
 
 const ACCEPTABLE_RATIO = 1.2;
 const BUFFER_MIN = 8;       // minutes subtracted from latest departure as a parking/settling buffer
@@ -23,7 +24,7 @@ function parseArriveBy(arriveByStr) {
   const NAIROBI_OFFSET_MS = 3 * 60 * 60 * 1000; // UTC+3, no DST
   const nowMs = Date.now();
   const nairobiMs = nowMs + NAIROBI_OFFSET_MS;
-  const midnightMs = nairobiMs - (nairobiMs % 86_400_000); // midnight Nairobi in shifted space
+  const midnightMs = nairobiMs - (nairobiMs % 86_400_000);
   const targetMs = midnightMs + (h * 60 + m) * 60_000 - NAIROBI_OFFSET_MS;
   return new Date(targetMs <= nowMs ? targetMs + 86_400_000 : targetMs);
 }
@@ -36,7 +37,7 @@ export async function handleDepart(bot, chatId, originStr, destinationStr, arriv
     if (err instanceof GeocodeNotFoundError) {
       await bot.sendMessage(chatId, err.message);
     } else {
-      console.error('Depart geocode error:', err.message);
+      logger.error({ err, chatId }, 'depart geocode error');
       await bot.sendMessage(chatId, 'Something went wrong looking up those places. Try again in a moment.');
     }
     return;
@@ -48,7 +49,7 @@ export async function handleDepart(bot, chatId, originStr, destinationStr, arriv
   try {
     current = await getDurationSeconds(origin, destination);
   } catch (err) {
-    console.error('Depart traffic error:', err.message);
+    logger.error({ err, chatId }, 'depart traffic error');
     await bot.sendMessage(chatId, 'Could not fetch traffic right now. Try again in a moment.');
     return;
   }
@@ -59,23 +60,35 @@ export async function handleDepart(bot, chatId, originStr, destinationStr, arriv
   }
 
   dbLogTraffic(dbId, origin.formatted, destination.formatted, current.seconds, current.staticSeconds);
+  if (origin.placeId && destination.placeId) {
+    dbLogTrafficPool(origin.placeId, destination.placeId, current.seconds);
+  }
 
   const currentMin = Math.round(current.seconds / 60);
   const typicalMin = Math.round(current.staticSeconds / 60);
 
   const { dayOfWeek, hourOfDay, dayName, hourStr } = getNairobiComponents();
   const personal   = dbGetPersonalTypical(dbId, origin.formatted, destination.formatted, dayOfWeek, hourOfDay);
-  const baselineMin = personal ? personal.avgMin : typicalMin;
-  const threshold   = Math.ceil(baselineMin * ACCEPTABLE_RATIO);
+  const pool       = !personal && origin.placeId && destination.placeId
+    ? dbGetPoolTypical(origin.placeId, destination.placeId, dayOfWeek, hourOfDay)
+    : null;
+
+  const baselineMin    = personal?.avgMin ?? pool?.avgMin ?? typicalMin;
+  const baselineSource = personal ? `your usual ${dayName} ${hourStr}`
+    : pool   ? `community average ${dayName} ${hourStr}`
+    : 'usual';
+  const threshold = Math.ceil(baselineMin * ACCEPTABLE_RATIO);
 
   const originShort = originStr.split(',')[0];
   const destShort   = destinationStr.split(',')[0];
   const mapsLink    = `https://www.google.com/maps/dir/?api=1&origin=${origin.lat},${origin.lon}&destination=${destination.lat},${destination.lon}&travelmode=driving`;
 
+  logger.info({ chatId, command: 'depart', origin: originStr, destination: destinationStr, arriveBy }, 'depart handled');
+
   if (arriveBy) {
     await handleDepartWithDeadline(
       bot, chatId, origin, destination, originStr, destinationStr,
-      arriveBy, current, baselineMin, dbId, mapsLink,
+      arriveBy, current, baselineMin, baselineSource, dbId, mapsLink,
     );
     return;
   }
@@ -84,10 +97,10 @@ export async function handleDepart(bot, chatId, originStr, destinationStr, arriv
   if (currentMin <= threshold) {
     const diff = currentMin - baselineMin;
     const context = diff < -2
-      ? ` — ${Math.abs(diff)} min faster than ${personal ? `your usual ${dayName} ${hourStr}` : 'usual'}`
+      ? ` — ${Math.abs(diff)} min faster than ${baselineSource}`
       : diff > 2
-      ? ` — ${diff} min slower than ${personal ? `your usual ${dayName} ${hourStr}` : 'usual'}`
-      : ` — about ${personal ? `your usual ${dayName} ${hourStr}` : 'normal'}`;
+      ? ` — ${diff} min slower than ${baselineSource}`
+      : ` — about ${baselineSource}`;
     await bot.sendMessage(
       chatId,
       `🟢 Good time to head out — ${originShort} → ${destShort} is ${currentMin} min right now${context}. Leave when you're ready.\n${mapsLink}`
@@ -96,9 +109,7 @@ export async function handleDepart(bot, chatId, originStr, destinationStr, arriv
   }
 
   // Traffic is heavy — find when it clears
-  const baselineLabel = personal
-    ? `your usual ${dayName} ${hourStr} is ${baselineMin} min`
-    : `usually ${typicalMin} min`;
+  const baselineLabel = `${baselineSource} is ${baselineMin} min`;
   await bot.sendMessage(
     chatId,
     `🔴 Traffic is heavy — ${currentMin} min right now (${baselineLabel}). Checking when it should clear…`
@@ -119,8 +130,8 @@ export async function handleDepart(bot, chatId, originStr, destinationStr, arriv
     );
   }
 
-  // Silently create the watch — no extra confirmation message, we already told the user above.
-  commitWatch(chatId, originStr, destinationStr, threshold);
+  // Silently create the watch — no extra confirmation, we already told the user above.
+  commitWatch(chatId, originStr, destinationStr, threshold, origin.placeId, destination.placeId);
 }
 
 // Query the route at 15, 30, 45, 60, 90, 120 min intervals in parallel.
@@ -148,7 +159,7 @@ async function findClearTime(origin, destination, targetMin) {
 
 async function handleDepartWithDeadline(
   bot, chatId, origin, destination, originStr, destinationStr,
-  arriveByStr, current, baselineMin, dbId, mapsLink,
+  arriveByStr, current, baselineMin, baselineSource, dbId, mapsLink,
 ) {
   const arriveByDate = parseArriveBy(arriveByStr);
   const nowMs = Date.now();
@@ -156,7 +167,6 @@ async function handleDepartWithDeadline(
   const deadlineStr = fmtTime(arriveByDate);
   const destShort = destinationStr.split(',')[0];
 
-  // Deadline already passed (shouldn't happen if NLP resolved AM/PM correctly, but guard it).
   if (minLeft <= 0) {
     await bot.sendMessage(chatId, `That deadline has already passed.`);
     return;
@@ -165,7 +175,6 @@ async function handleDepartWithDeadline(
   // Far-future deadline (> 4 h): current traffic is irrelevant; use a predictive probe instead.
   if (minLeft > FAR_FUTURE_MIN) {
     const staticMin = Math.round(current.staticSeconds / 60);
-    // Probe at (staticMin × 1.5) before the deadline as a safe estimate of departure time.
     const probeDepTime = new Date(arriveByDate.getTime() - Math.max(staticMin * 1.5, 45) * 60_000);
     let predicted;
     try {
@@ -187,7 +196,7 @@ async function handleDepartWithDeadline(
   // Near-future deadline: use current traffic.
   const currentMin = Math.round(current.seconds / 60);
   const diff = currentMin - baselineMin;
-  const slackNow = minLeft - currentMin; // buffer remaining if leaving right now
+  const slackNow = minLeft - currentMin;
 
   // Can't make it even leaving right now.
   if (slackNow <= 0) {
@@ -201,7 +210,7 @@ async function handleDepartWithDeadline(
 
   // Technically possible but barely — no room for parking or settling in.
   if (slackNow <= BUFFER_MIN) {
-    const heavyCtx = diff >= 3 ? ` (${diff} min heavier than usual)` : '';
+    const heavyCtx = diff >= 3 ? ` (${diff} min heavier than ${baselineSource})` : '';
     await bot.sendMessage(
       chatId,
       `Leave right now — ${destShort} is ${currentMin} min away${heavyCtx} ` +
@@ -211,20 +220,16 @@ async function handleDepartWithDeadline(
   }
 
   // Comfortable: enough slack to recommend a "leave by" time with buffer baked in.
-  // latestDep = latest moment where you still arrive (currentMin + BUFFER_MIN) before deadline.
   const latestDep = new Date(arriveByDate.getTime() - (currentMin + BUFFER_MIN) * 60_000);
   const minUntilLatest = Math.round((latestDep.getTime() - nowMs) / 60_000);
   const trafficCtx = diff <= -3
-    ? ` — ${Math.abs(diff)} min faster than usual`
+    ? ` — ${Math.abs(diff)} min faster than ${baselineSource}`
     : diff >= 3
-    ? ` — ${diff} min slower than usual`
+    ? ` — ${diff} min slower than ${baselineSource}`
     : '';
 
-  // Traffic is notably heavy: give the departure time based on current conditions,
-  // but also set a watch so the user is alerted if it eases (giving them more buffer).
+  // Traffic is notably heavy: give departure time but also set a watch.
   if (diff > 5) {
-    // Watch threshold: max travel time that still gets them there in time.
-    // Slightly conservative (−5 min) to account for time that may pass before the watch fires.
     const watchThreshold = Math.max(Math.ceil(minLeft - BUFFER_MIN - 5), 1);
     await bot.sendMessage(
       chatId,
@@ -233,7 +238,7 @@ async function handleDepartWithDeadline(
       `don't wait much longer or you'll risk missing ${deadlineStr}. ` +
       `I'll alert you if it drops to under ${watchThreshold} min.\n${mapsLink}`
     );
-    commitWatch(chatId, originStr, destinationStr, watchThreshold);
+    commitWatch(chatId, originStr, destinationStr, watchThreshold, origin.placeId, destination.placeId);
     return;
   }
 

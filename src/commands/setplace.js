@@ -1,5 +1,6 @@
 import { geocode, GeocodeNotFoundError } from '../utils/geocode.js';
 import { dbSetPlace, dbGetSavedPlaces } from '../db.js';
+import { logger } from '../utils/logger.js';
 
 // Geocodes addressStr and returns the formatted address, or null on error (error
 // message already sent to chatId). Used by the NLP confirmation flow in bot.js.
@@ -11,7 +12,7 @@ export async function geocodePlace(bot, chatId, addressStr) {
     if (err instanceof GeocodeNotFoundError) {
       await bot.sendMessage(chatId, err.message);
     } else {
-      console.error('setplace geocode error:', err.message);
+      logger.error({ err }, 'setplace geocode error');
       await bot.sendMessage(chatId, 'Something went wrong looking up that address. Try again in a moment.');
     }
     return null;
@@ -32,7 +33,7 @@ export async function handleSetPlace(bot, chatId, placeName, addressStr, userId 
     if (err instanceof GeocodeNotFoundError) {
       await bot.sendMessage(chatId, err.message);
     } else {
-      console.error('setplace geocode error:', err.message);
+      logger.error({ err }, 'setplace geocode error');
       await bot.sendMessage(chatId, 'Something went wrong looking up that address. Try again in a moment.');
     }
     return;
@@ -53,7 +54,7 @@ export function registerSetPlace(bot) {
     try {
       await handleSetPlace(bot, chatId, match[1], match[2]);
     } catch (err) {
-      console.error('setplace handler error:', err.message);
+      logger.error({ err }, 'setplace handler error');
     }
   });
 }
@@ -75,7 +76,7 @@ export function registerListPlaces(bot) {
       const lines = entries.map(([name, addr]) => `${name}: ${addr}`);
       await bot.sendMessage(chatId, `Your saved places:\n\n${lines.join('\n')}`);
     } catch (err) {
-      console.error('places handler error:', err.message);
+      logger.error({ err }, 'places handler error');
     }
   });
 }

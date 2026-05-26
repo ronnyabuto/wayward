@@ -1,5 +1,6 @@
 import { getDurationSeconds } from './services/traffic.js';
-import { dbGetAllWatches, dbDeleteWatch, dbSetFailCount, dbLogTraffic } from './db.js';
+import { dbGetAllWatches, dbDeleteWatch, dbSetFailCount, dbLogTraffic, dbLogTrafficPool } from './db.js';
+import { logger } from './utils/logger.js';
 
 export const watches = new Map();
 
@@ -8,16 +9,18 @@ const POLL_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
 export function loadWatchesFromDb() {
   for (const row of dbGetAllWatches()) {
     watches.set(row.id, {
-      chatId: row.chat_id,
-      origin: row.origin,
-      destination: row.destination,
+      chatId:          row.chat_id,
+      origin:          row.origin,
+      destination:     row.destination,
+      originPlaceId:   row.origin_place_id ?? null,
+      destPlaceId:     row.dest_place_id   ?? null,
       thresholdMinutes: row.threshold_min,
-      failCount: row.fail_count,
-      active: true,
+      failCount:       row.fail_count,
+      active:          true,
     });
   }
   if (watches.size > 0) {
-    console.log(`Restored ${watches.size} watch(es) from database.`);
+    logger.info({ count: watches.size }, 'Restored watches from database.');
   }
 }
 
@@ -31,7 +34,7 @@ async function pollAllWatches(bot) {
     try {
       await checkWatch(bot, watchId, watch);
     } catch (err) {
-      console.error(`Watch #${watchId} check failed:`, err.message);
+      logger.error({ err, watchId }, 'watch check failed');
       watch.failCount = (watch.failCount ?? 0) + 1;
       dbSetFailCount(watchId, watch.failCount);
 
@@ -51,16 +54,33 @@ async function pollAllWatches(bot) {
       }
     }
   }
+
+  // Dead man's switch: ping Healthchecks.io after every scheduler cycle so an
+  // alert fires if the process stops running. Configure HEALTHCHECK_UUID in .env.
+  if (process.env.HEALTHCHECK_UUID) {
+    fetch(`https://hc-ping.com/${process.env.HEALTHCHECK_UUID}`, {
+      signal: AbortSignal.timeout(3000),
+    }).catch(e => logger.warn({ err: e }, 'healthcheck ping failed'));
+  }
 }
 
 async function checkWatch(bot, watchId, watch) {
-  const result = await getDurationSeconds(watch.origin, watch.destination);
+  // Prefer placeId-based routing (more accurate access-point resolution);
+  // fall back to the stored address string for watches created before this migration.
+  const routeOrigin = watch.originPlaceId ? { placeId: watch.originPlaceId } : watch.origin;
+  const routeDest   = watch.destPlaceId   ? { placeId: watch.destPlaceId   } : watch.destination;
+
+  const result = await getDurationSeconds(routeOrigin, routeDest);
   if (result === null) return;
 
   // Reset failure counter on a successful API response.
   watch.failCount = 0;
   dbSetFailCount(watchId, 0);
+
   dbLogTraffic(watch.chatId, watch.origin, watch.destination, result.seconds, result.staticSeconds);
+  if (watch.originPlaceId && watch.destPlaceId) {
+    dbLogTrafficPool(watch.originPlaceId, watch.destPlaceId, result.seconds);
+  }
 
   const minutes = Math.round(result.seconds / 60);
   if (minutes <= watch.thresholdMinutes) {
