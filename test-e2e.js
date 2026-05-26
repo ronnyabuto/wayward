@@ -5,10 +5,13 @@
  */
 import 'dotenv/config';
 import { initDb, dbGetSavedPlaces, dbSetPlace, dbLogTraffic, dbGetPersonalTypical,
-         dbInsertWatch, dbDeleteWatch, dbGetAllWatches, dbSetFailCount } from './src/db.js';
+         dbInsertWatch, dbDeleteWatch, dbGetAllWatches, dbSetFailCount,
+         dbPersistTurn, dbRetrieveRelevantTurns,
+         dbUpsertFact, dbGetActiveFacts,
+         dbLogDeparture, dbGetTypicalDepartureHour } from './src/db.js';
 import { geocode, GeocodeNotFoundError } from './src/utils/geocode.js';
 import { getDurationSeconds } from './src/services/traffic.js';
-import { parseIntent } from './src/utils/nlp.js';
+import { parseIntent, quickClassify } from './src/utils/nlp.js';
 import { getNairobiComponents } from './src/utils/time.js';
 import { getAlternativeRoutes, scoreAndRank, buildMapsLink, extractWaypoints } from './src/services/scenic.js';
 
@@ -130,7 +133,145 @@ await test('dbSetFailCount updates fail_count in DB', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-section('3. TIME UTILITIES — Nairobi components');
+section('3. MEMORY LAYER — persistent turns, FTS5 retrieval, temporal facts, departure events');
+
+// Isolated user/chat IDs so memory tests never bleed into other sections.
+const MEM_USER_ID = 9300000 + (Date.now() % 999999 | 0);
+const MEM_CHAT_ID = MEM_USER_ID;
+
+await test('dbPersistTurn stores a turn in memory_turns', () => {
+  dbPersistTurn(MEM_USER_ID, MEM_CHAT_ID,
+    'how long to Westlands from Karen',
+    JSON.stringify({ command: 'check', origin: 'Karen, Nairobi', destination: 'Westlands, Nairobi' }));
+});
+
+await test('dbRetrieveRelevantTurns returns the stored turn', () => {
+  const turns = dbRetrieveRelevantTurns(MEM_USER_ID, 'Westlands');
+  assert(turns.length === 1, `Expected 1 turn, got ${turns.length}`);
+  assert(turns[0].userMessage === 'how long to Westlands from Karen',
+    `Wrong message: "${turns[0].userMessage}"`);
+  assert(typeof turns[0].modelResponse === 'string', 'modelResponse should be a JSON string');
+});
+
+await test('Turns are returned oldest-first (correct ordering for Gemini history)', () => {
+  // Store a second turn and verify the two come back in insertion order.
+  dbPersistTurn(MEM_USER_ID, MEM_CHAT_ID,
+    'what about from Gigiri instead?',
+    JSON.stringify({ command: 'check', origin: 'Gigiri, Nairobi', destination: 'Westlands, Nairobi' }));
+  const turns = dbRetrieveRelevantTurns(MEM_USER_ID, 'Westlands');
+  assert(turns.length === 2, `Expected 2 turns, got ${turns.length}`);
+  assert(turns[0].userMessage === 'how long to Westlands from Karen',
+    `First turn should be the oldest. Got: "${turns[0].userMessage}"`);
+  assert(turns[1].userMessage === 'what about from Gigiri instead?',
+    `Second turn should be newest. Got: "${turns[1].userMessage}"`);
+});
+
+await test('FTS5 keyword search surfaces a relevant older turn outside the recency window', () => {
+  // Store a turn mentioning Ngong Road, then push it out of the 5-turn recency window.
+  const NGONG_USER = MEM_USER_ID + 1;
+  dbPersistTurn(NGONG_USER, MEM_CHAT_ID,
+    'traffic on Ngong Road from Karen',
+    JSON.stringify({ command: 'check', origin: 'Karen', destination: 'CBD', corridor: 'Ngong Road' }));
+
+  // Flood with 5 unrelated turns so the Ngong turn is no longer in the recency set.
+  for (let i = 0; i < 5; i++) {
+    dbPersistTurn(NGONG_USER, MEM_CHAT_ID, `unrelated message ${i}`,
+      JSON.stringify({ command: 'unknown' }));
+  }
+
+  // Querying with "Ngong" should pull the old turn back via BM25 keyword match.
+  const turns = dbRetrieveRelevantTurns(NGONG_USER, 'Ngong Road');
+  const found = turns.some(t => t.userMessage.includes('Ngong Road'));
+  assert(found,
+    `FTS5 should retrieve the Ngong Road turn. Got: [${turns.map(t => `"${t.userMessage}"`).join(', ')}]`);
+  console.log(`       FTS5 correctly surfaced the Ngong Road turn from beyond the recency window`);
+});
+
+await test('dbRetrieveRelevantTurns caps output at 5 turns', () => {
+  // MEM_USER_ID now has 2 turns; store 10 more to confirm cap is enforced.
+  for (let i = 0; i < 10; i++) {
+    dbPersistTurn(MEM_USER_ID, MEM_CHAT_ID, `padding message ${i}`,
+      JSON.stringify({ command: 'unknown' }));
+  }
+  const turns = dbRetrieveRelevantTurns(MEM_USER_ID, 'anything');
+  assert(turns.length <= 5, `Expected ≤5 turns, got ${turns.length}`);
+});
+
+await test('dbPersistTurn prunes stored turns beyond 50 per user', () => {
+  // A fresh user ID so we start from 0.
+  const PRUNE_USER = MEM_USER_ID + 2;
+  for (let i = 0; i < 55; i++) {
+    dbPersistTurn(PRUNE_USER, MEM_CHAT_ID, `msg ${i}`,
+      JSON.stringify({ command: 'check' }));
+  }
+  // After 55 inserts only 50 are kept — the first 5 ("msg 0"–"msg 4") must be gone.
+  // FTS5 will not find them if they were deleted.
+  const turns = dbRetrieveRelevantTurns(PRUNE_USER, 'msg 0');
+  const oldestPresent = turns.some(t => t.userMessage === 'msg 0');
+  assert(!oldestPresent,
+    `"msg 0" should have been pruned after 55 inserts. Present in: [${turns.map(t => t.userMessage).join(', ')}]`);
+  console.log(`       Oldest turn correctly pruned after 55 inserts`);
+});
+
+await test('Memory persists across DB re-init (simulates bot restart)', () => {
+  // Store a sentinel turn, re-initialise the DB (same file), then retrieve it.
+  const PERSIST_USER = MEM_USER_ID + 3;
+  dbPersistTurn(PERSIST_USER, MEM_CHAT_ID, 'pre-restart message',
+    JSON.stringify({ command: 'check', origin: 'Thika', destination: 'CBD' }));
+
+  initDb(); // re-opens same SQLite file — simulates restart
+
+  const turns = dbRetrieveRelevantTurns(PERSIST_USER, 'pre-restart');
+  assert(turns.length >= 1, `Expected ≥1 turn after re-init, got ${turns.length}. Memory was lost on restart.`);
+  assert(turns.some(t => t.userMessage === 'pre-restart message'),
+    `Sentinel turn not found after re-init`);
+  console.log(`       Memory survives restart — ${turns.length} turn(s) retrieved from SQLite`);
+});
+
+await test('dbUpsertFact creates a fact and dbGetActiveFacts returns it', () => {
+  dbUpsertFact(MEM_USER_ID, 'user', 'office_is', 'Westlands, Nairobi, Kenya');
+  const facts = dbGetActiveFacts(MEM_USER_ID);
+  const f = facts.find(x => x.predicate === 'office_is');
+  assert(f?.object === 'Westlands, Nairobi, Kenya',
+    `Fact not found or wrong value. facts: ${JSON.stringify(facts)}`);
+});
+
+await test('dbUpsertFact invalidates the old value when the same predicate is upserted', () => {
+  dbUpsertFact(MEM_USER_ID, 'user', 'office_is', 'Upper Hill, Nairobi, Kenya');
+  const facts = dbGetActiveFacts(MEM_USER_ID);
+  const active = facts.filter(x => x.predicate === 'office_is');
+  assert(active.length === 1,
+    `Expected exactly 1 active office fact, got ${active.length}: ${JSON.stringify(active)}`);
+  assert(active[0].object === 'Upper Hill, Nairobi, Kenya',
+    `Expected Upper Hill, got: "${active[0].object}"`);
+  console.log(`       Old "Westlands" fact invalidated; "Upper Hill" is the new active value`);
+});
+
+await test('dbLogDeparture records an event', () => {
+  dbLogDeparture(MEM_USER_ID, 'Kahawa Sukari, Nairobi, Kenya', 'Westlands, Nairobi, Kenya');
+});
+
+await test('dbGetTypicalDepartureHour returns null for fewer than 3 data points', () => {
+  const { dayOfWeek } = getNairobiComponents();
+  const h = dbGetTypicalDepartureHour(MEM_USER_ID,
+    'Kahawa Sukari, Nairobi, Kenya', 'Westlands, Nairobi, Kenya', dayOfWeek);
+  assert(h === null, `Expected null for 1 event, got ${h}`);
+});
+
+await test('dbGetTypicalDepartureHour returns the correct hour after 3+ same-weekday events', () => {
+  const { dayOfWeek, hourOfDay } = getNairobiComponents();
+  // Add 2 more to reach 3 total for this day.
+  dbLogDeparture(MEM_USER_ID, 'Kahawa Sukari, Nairobi, Kenya', 'Westlands, Nairobi, Kenya');
+  dbLogDeparture(MEM_USER_ID, 'Kahawa Sukari, Nairobi, Kenya', 'Westlands, Nairobi, Kenya');
+  const h = dbGetTypicalDepartureHour(MEM_USER_ID,
+    'Kahawa Sukari, Nairobi, Kenya', 'Westlands, Nairobi, Kenya', dayOfWeek);
+  assert(h !== null, `Expected a valid hour after 3 events, got null`);
+  assert(h === hourOfDay, `Expected hour ${hourOfDay} (current hour), got ${h}`);
+  console.log(`       Typical departure hour on this weekday: ${h}:00`);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+section('5. TIME UTILITIES — Nairobi components');
 
 await test('getNairobiComponents returns valid fields', () => {
   const { dayOfWeek, hourOfDay, dayName, hourStr } = getNairobiComponents();
@@ -149,7 +290,7 @@ await test('getNairobiComponents with explicit UTC midnight is 3am Nairobi', () 
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-section('4. GEOCODING — real Google Geocoding API calls');
+section('6. GEOCODING — real Google Geocoding API calls');
 
 let originGeocode, destGeocode;
 
@@ -204,7 +345,7 @@ await test('GeocodeNotFoundError thrown for country-level result (Kenya)', async
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-section('5. TRAFFIC API — real Google Routes API calls');
+section('7. TRAFFIC API — real Google Routes API calls');
 
 let trafficResult;
 
@@ -243,7 +384,45 @@ await test('getDurationSeconds returns null for impossible route (ocean → land
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-section('6. NLP / INTENT PARSING — Gemini API, all 6 commands');
+section('8. NLP / INTENT PARSING — Gemini API, all 6 commands + corridor fix + Swahili');
+
+// ── quickClassify unit tests (no API cost) ────────────────────────────────────
+
+await test('quickClassify: the exact 0-min bug message now returns check (trailing ? stripped)', () => {
+  const q = quickClassify('how thika road looking right now from kahawa sukari to cbd?');
+  assert(q !== null,
+    'quickClassify returned null — trailing "?" on destination is no longer being stripped');
+  assert(q.command === 'check', `Expected check, got: ${q?.command}`);
+  assert(q.origin?.toLowerCase() === 'kahawa sukari',
+    `Origin should be "kahawa sukari", got: "${q?.origin}"`);
+  assert(q.destination?.toLowerCase() === 'cbd',
+    `Destination should be "cbd" (stripped of ?), got: "${q?.destination}"`);
+  console.log(`       quickClassify correctly extracted origin="${q.origin}", destination="${q.destination}"`);
+});
+
+await test('quickClassify: trailing punctuation stripped for !, ., and , too', () => {
+  const variants = [
+    ['Karen to CBD!',    'cbd'],
+    ['Karen to CBD.',    'cbd'],
+    ['Karen to CBD,',    'cbd'],
+    ['Karen to CBD???',  'cbd'],
+  ];
+  for (const [input, expectedDest] of variants) {
+    const q = quickClassify(input);
+    assert(q !== null, `quickClassify returned null for: "${input}"`);
+    assert(q.destination?.toLowerCase() === expectedDest,
+      `For "${input}": expected dest "${expectedDest}", got "${q?.destination}"`);
+  }
+  console.log(`       All trailing punctuation variants stripped correctly`);
+});
+
+await test('quickClassify: unambiguous "X to Y" without road prefix still works', () => {
+  const q = quickClassify('Kahawa Sukari to Westlands');
+  assert(q !== null, 'quickClassify should handle plain "X to Y"');
+  assert(q.command === 'check', `Expected check, got ${q?.command}`);
+  assert(q.origin?.toLowerCase() === 'kahawa sukari', `origin: ${q?.origin}`);
+  assert(q.destination?.toLowerCase() === 'westlands', `dest: ${q?.destination}`);
+});
 
 // Small delay between Gemini calls to avoid per-minute rate limits.
 const NLP_DELAY_MS = 4500;
@@ -373,7 +552,7 @@ await test('NLP: multi-turn — "same threshold" reuses prior threshold', async 
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-section('7. FULL FLOW SIMULATION — check command');
+section('9. FULL FLOW SIMULATION — check command');
 
 await test('Full check flow: Kahawa Sukari → Westlands', async () => {
   // Simulate exactly what handleCheck does
@@ -410,7 +589,7 @@ await test('Full check flow: Kahawa Sukari → Westlands', async () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-section('8. FULL FLOW SIMULATION — depart command logic');
+section('10. FULL FLOW SIMULATION — depart command logic');
 
 await test('Depart flow: threshold calculation uses personal baseline when available', async () => {
   const ACCEPTABLE_RATIO = 1.2;
@@ -440,7 +619,7 @@ await test('Depart flow: threshold calculation uses personal baseline when avail
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-section('9. FULL FLOW SIMULATION — watch threshold validation');
+section('11. FULL FLOW SIMULATION — watch threshold validation');
 
 await test('Watch validation: current <= threshold → fire immediately', async () => {
   const [orig, dest] = await Promise.all([geocode(ORIGIN_STR), geocode(DEST_STR)]);
@@ -466,7 +645,7 @@ await test('Watch validation: threshold below floor → rejected as impossible',
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-section('10. SCENIC ROUTING — ORS + Overpass');
+section('12. SCENIC ROUTING — ORS + Overpass');
 
 let karenCoords, gigiriCoords;
 
@@ -508,7 +687,7 @@ await test('extractWaypoints + buildMapsLink produces a valid Google Maps URL', 
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-section('11. EDGE CASES & REGRESSION CHECKS');
+section('13. EDGE CASES & REGRESSION CHECKS');
 
 await test('staticSeconds falls back to seconds when not in API response', async () => {
   // Validate the fallback branch in traffic.js line 44-46
@@ -549,6 +728,61 @@ await test('NLP: place name with typo corrected by Gemini', async () => {
   const i = await parseAndLog('how long from Karen to Weslands');
   assert(i.command === 'check', `Expected check, got ${i.command}`);
   assert(i.destination?.toLowerCase().includes('westlands'), `Destination should be corrected to Westlands: ${i.destination}`);
+});
+
+// ── Corridor fix (road name separation) ──────────────────────────────────────
+// These tests go through Gemini because the messages do NOT match quickClassify
+// cleanly (saved-place aliases force the ALIAS reject and Gemini path).
+
+await test('NLP [corridor]: road name goes into corridor field, not origin', async () => {
+  // "home" and "work" are ALIAS-rejected by quickClassify → Gemini handles it.
+  const places = { home: 'Kahawa Sukari, Nairobi, Kenya', work: 'Westlands, Nairobi, Kenya' };
+  const i = await parseAndLog('how is Thika Road from home to work?', places);
+  assert(i.command === 'check', `Expected check, got ${i.command}`);
+  // Origin must resolve to home (Kahawa Sukari), NOT to "Thika Road"
+  assert(
+    i.origin?.toLowerCase().includes('kahawa') || i.origin?.toLowerCase().includes('home'),
+    `Origin should be Kahawa Sukari/home, not a road name. Got: "${i.origin}"`
+  );
+  assert(
+    i.destination?.toLowerCase().includes('westlands') || i.destination?.toLowerCase().includes('work'),
+    `Destination should be Westlands/work. Got: "${i.destination}"`
+  );
+  // The corridor field should capture the road name
+  assert(
+    i.corridor?.toLowerCase().includes('thika'),
+    `corridor should be "Thika Road". Got: "${i.corridor}"`
+  );
+  console.log(`       corridor="${i.corridor}" correctly separated from origin="${i.origin}"`);
+});
+
+await test('NLP [corridor]: Ngong Road corridor with explicit origin/dest', async () => {
+  const i = await parseAndLog('how is traffic on Ngong Road from Junction to town?');
+  assert(['check', 'depart'].includes(i.command), `Expected check or depart, got ${i.command}`);
+  // Origin should be Junction Mall area, NOT "Ngong Road"
+  const roadNames = ['ngong road', 'mombasa road', 'thika road', 'uhuru highway'];
+  assert(
+    !roadNames.some(r => i.origin?.toLowerCase() === r),
+    `Origin should be a place, not a road name. Got: "${i.origin}"`
+  );
+  console.log(`       origin="${i.origin}", corridor="${i.corridor ?? 'null'}"`);
+});
+
+await test('NLP [Swahili]: "naenda town kutoka Westlands" → check/depart with correct O/D', async () => {
+  const i = await parseAndLog('naenda town kutoka Westlands');
+  assert(['check', 'depart'].includes(i.command),
+    `Expected check or depart, got ${i.command}. Swahili "naenda" = going to.`);
+  assert(
+    i.origin?.toLowerCase().includes('westlands'),
+    `Origin should be Westlands. Got: "${i.origin}"`
+  );
+  assert(
+    i.destination?.toLowerCase().includes('cbd') ||
+    i.destination?.toLowerCase().includes('nairobi') ||
+    i.destination?.toLowerCase().includes('town'),
+    `Destination should be town/CBD. Got: "${i.destination}"`
+  );
+  console.log(`       Swahili parsed: origin="${i.origin}" → destination="${i.destination}"`);
 });
 
 await test('Traffic: parallel future forecasts all return valid results', async () => {

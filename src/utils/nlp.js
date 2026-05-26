@@ -23,7 +23,7 @@ export function quickClassify(text) {
   if (routeMatch) {
     const [, rawOrigin, rawDest] = routeMatch;
     const origin      = rawOrigin.trim();
-    const destination = rawDest.trim();
+    const destination = rawDest.trim().replace(/[?!.,]+$/, '');
 
     // Reject vague pronouns, saved-place aliases, or fragments too short to geocode.
     const VAGUE     = /\b(here|there|get\s+there|from\s+here|from\s+there|it|that)\b/i;
@@ -88,7 +88,7 @@ let keyIndex = 0;
 // Field order matches the system prompt to avoid model confusion (per Gemini docs).
 const RESPONSE_SCHEMA = {
   type: 'object',
-  required: ['command', 'origin', 'destination', 'threshold', 'arrive_by', 'place_name', 'place_address', 'route_number', 'clarification'],
+  required: ['command', 'origin', 'destination', 'threshold', 'arrive_by', 'place_name', 'place_address', 'route_number', 'corridor', 'clarification'],
   properties: {
     command: {
       type: 'string',
@@ -130,6 +130,11 @@ const RESPONSE_SCHEMA = {
       nullable: true,
       description: 'Matatu route number if user specifies one (e.g., "23", "Route 23"). Only for matatu; null for all other commands.',
     },
+    corridor: {
+      type: 'string',
+      nullable: true,
+      description: 'Road or highway corridor name when the user asks about traffic on a specific road (e.g. "Thika Road", "Ngong Road"). Never assign a road or highway name to origin or destination — this field only. Null for all other commands.',
+    },
     clarification: {
       type: 'string',
       nullable: true,
@@ -149,6 +154,7 @@ Given a user message, their saved locations, and the current local time, return 
   "arrive_by": "<HH:MM or null>",
   "place_name": "<name to save or null>",
   "place_address": "<address to save or null>",
+  "corridor": "<road or highway name, or null>",
   "clarification": "<string | null>"
 }
 
@@ -177,6 +183,9 @@ Key distinctions:
 - "will I make it to JKIA by 8?" → "depart" with arrive_by "08:00"
 - "I need to get there in the next 45 minutes" → "depart" with arrive_by = current time + 45 min as HH:MM
 - "my home is at Seresponda Court" → "setplace" with place_name "home" and place_address "Seresponda Court"
+- "how thika road looking right now from kahawa sukari to cbd?" → check, origin="Kahawa Sukari, Nairobi, Kenya", destination="Nairobi CBD, Kenya", corridor="Thika Road"
+- "Ngong Road traffic from Karen to town" → check, origin="Karen, Nairobi, Kenya", destination="Nairobi CBD, Kenya", corridor="Ngong Road"
+- "matatu on Mombasa Road from EPZ to CBD" → matatu, origin="Export Processing Zone, Athi River, Kenya", destination="Nairobi CBD, Kenya", corridor="Mombasa Road"
 
 Other rules:
 - origin and destination: most precise, correctly spelled place names including neighbourhood and city (e.g. "Seresponda Court, Kileleshwa, Nairobi, Kenya"). Never invent a place.
@@ -186,7 +195,9 @@ Other rules:
   - Relative deadlines: convert to absolute HH:MM using current local time. "in 45 minutes" at 17:10 → "17:55". "within the hour" at 16:40 → "17:40".
   - Return null for arrive_by on all non-depart commands, and for depart when no deadline is stated.
 - For all other commands, threshold and arrive_by must be null.
+- Road and highway names (e.g. Thika Road, Ngong Road, Mombasa Road, Waiyaki Way, Langata Road, Uhuru Highway, Jogoo Road, Eastern Bypass, Southern Bypass, Northern Bypass) identify a corridor — not an origin or destination. When the user says "how is [road] from X to Y", set origin=X and destination=Y. The road name belongs in corridor only. Never assign a road or highway name to origin or destination.
 - route_number is only set for "matatu"; null for all other commands.
+- Messages may be in English, Swahili, or Sheng (Nairobi street slang). Extract intent and place names regardless of language. Key terms: 'nataka kwenda'/'naenda' = going to, 'town' = Nairobi CBD, 'stage' = matatu terminus, 'mbaya' = bad/heavy traffic, 'safi' = clear/good.
 - Do not add any text outside the JSON object. No markdown, no explanation.
 
 Conversation context:

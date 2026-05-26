@@ -1,6 +1,6 @@
 import { getRouteOptions } from '../services/traffic.js';
 import { geocode, GeocodeNotFoundError } from '../utils/geocode.js';
-import { dbLogTraffic, dbGetPersonalTypical } from '../db.js';
+import { dbLogTraffic, dbGetPersonalTypical, dbLogDeparture } from '../db.js';
 import { getNairobiComponents } from '../utils/time.js';
 
 function congestionLabel(ratio) {
@@ -43,6 +43,7 @@ export async function handleCheck(bot, chatId, originStr, destinationStr, userId
 
   const primary = routes[0];
   dbLogTraffic(dbId, origin.formatted, destination.formatted, primary.seconds, primary.staticSeconds);
+  dbLogDeparture(dbId, origin.formatted, destination.formatted);
 
   const { dayOfWeek, hourOfDay, dayName, hourStr } = getNairobiComponents();
   const personal = dbGetPersonalTypical(dbId, origin.formatted, destination.formatted, dayOfWeek, hourOfDay);

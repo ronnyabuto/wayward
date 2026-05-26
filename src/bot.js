@@ -8,23 +8,10 @@ import { handleMatatu } from './commands/matatu.js';
 import { handleSetPlace, registerSetPlace, registerListPlaces } from './commands/setplace.js';
 import { startScheduler, loadWatchesFromDb } from './scheduler.js';
 import { parseIntent, quickClassify } from './utils/nlp.js';
-import { initDb, dbGetSavedPlaces } from './db.js';
+import { initDb, dbGetSavedPlaces, dbPersistTurn, dbRetrieveRelevantTurns } from './db.js';
 
 const { TELEGRAM_BOT_TOKEN } = process.env;
 
-const MAX_HISTORY_TURNS = 5;
-const conversationStore = new Map(); // chatId → [{ userMessage, modelResponse }, ...]
-
-function getHistory(chatId) {
-  return conversationStore.get(chatId) ?? [];
-}
-
-function addTurn(chatId, userMessage, modelResponse) {
-  const history = getHistory(chatId);
-  history.push({ userMessage, modelResponse });
-  if (history.length > MAX_HISTORY_TURNS) history.shift();
-  conversationStore.set(chatId, history);
-}
 
 if (!TELEGRAM_BOT_TOKEN) {
   console.error('Missing TELEGRAM_BOT_TOKEN. Copy .env.example → .env and fill it in.');
@@ -68,14 +55,14 @@ bot.on('message', async (msg) => {
 
     if (quick && quick.command === 'check' && quick.origin && quick.destination) {
       await handleCheck(bot, chatId, quick.origin, quick.destination, userId);
-      addTurn(chatId, text, JSON.stringify(quick));
+      dbPersistTurn(userId, chatId, text, JSON.stringify(quick));
       return;
     }
 
     if (quick && quick.command === 'matatu') {
       if (quick.origin && quick.destination) {
         await handleMatatu(bot, chatId, quick.origin, quick.destination);
-        addTurn(chatId, text, JSON.stringify(quick));
+        dbPersistTurn(userId, chatId, text, JSON.stringify(quick));
         return;
       }
       // Has route_number but no corridor — fall through to Gemini to extract location context.
@@ -84,7 +71,7 @@ bot.on('message', async (msg) => {
     // Layer 2: Gemini — handles saved-place resolution, context carry-forward,
     // arrive_by extraction, and any pattern the regex doesn't catch.
     const savedPlaces = dbGetSavedPlaces(userId);
-    const history     = getHistory(chatId);
+    const history     = dbRetrieveRelevantTurns(userId, text);
 
     let intent;
     try {
@@ -95,7 +82,7 @@ bot.on('message', async (msg) => {
       return;
     }
 
-    addTurn(chatId, text, JSON.stringify(intent));
+    dbPersistTurn(userId, chatId, text, JSON.stringify(intent));
 
     if (intent.command === 'unknown') {
       await bot.sendMessage(
