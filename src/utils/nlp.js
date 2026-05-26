@@ -31,8 +31,9 @@ export function quickClassify(text) {
     if (origin.length < 2 || destination.length < 2) return null;
     if (VAGUE.test(origin) || VAGUE.test(destination))  return null;
     if (ALIAS.test(origin) || ALIAS.test(destination))  return null;
-    // Reject sentence fragments: "I want to X" splits as origin="I want", dest="X…".
-    if (/^(?:i\b|you\b|we\b|they\b)/i.test(origin)) return null;
+    // Reject sentence fragments that split on the first "to" but aren't place names.
+    // "I want to go to X" → origin="I want" or "Want"; "Going to X from Y" → origin="Going".
+    if (/^(?:i\b|you\b|we\b|they\b|want\b|need\b|going\b|trying\b|planning\b|heading\b|looking\b|check\b)/i.test(origin)) return null;
     // Reject if destination is a sentence ending in a question or exclamation.
     if (/[?!]/.test(destination)) return null;
 

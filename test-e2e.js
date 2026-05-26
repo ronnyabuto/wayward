@@ -425,6 +425,24 @@ await test('quickClassify: unambiguous "X to Y" without road prefix still works'
   assert(q.destination?.toLowerCase() === 'westlands', `dest: ${q?.destination}`);
 });
 
+await test('quickClassify: "Want to go to X from Y" → null (verb fragment as origin rejected)', () => {
+  const q = quickClassify('Want to go to langata from kahawa sukari');
+  assert(q === null, `Expected null (falls through to Gemini), got command=${q?.command} origin="${q?.origin}"`);
+});
+
+await test('quickClassify: "Going to X from Y" variants → null', () => {
+  const cases = [
+    'Going to Westlands from Karen',
+    'Heading to town from Gigiri',
+    'Need to get to JKIA from CBD',
+    'Planning to go to Langata from Westlands',
+  ];
+  for (const msg of cases) {
+    const q = quickClassify(msg);
+    assert(q === null, `"${msg}" should return null, got origin="${q?.origin}"`);
+  }
+});
+
 // Small delay between Gemini calls to avoid per-minute rate limits.
 const NLP_DELAY_MS = 4500;
 async function parseAndLog(msg, savedPlaces = {}, history = []) {

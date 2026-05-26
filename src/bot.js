@@ -152,6 +152,12 @@ bot.on('message', async (msg) => {
       return;
     }
 
+    // Warn once if the user asked for a waypoint — routing via intermediate stops
+    // isn't supported; show the direct result and let them know.
+    if (/\bvia\b/i.test(text) && ['check', 'depart'].includes(intent.command)) {
+      await bot.sendMessage(chatId, "I can't route via a specific waypoint yet — showing you the fastest direct options.");
+    }
+
     if (intent.command === 'check') {
       await handleCheck(bot, chatId, intent.origin, intent.destination, userId);
       return;
