@@ -12,6 +12,38 @@ function buildQuery(place) {
   return hasCountry ? place : `${place}, Kenya`;
 }
 
+// Strip a known locality name from a comma-delimited query string.
+// "Kahawa Sukari, Nairobi, Kenya" + "Nairobi" → "Kahawa Sukari, Kenya"
+function stripLocality(query, localityName) {
+  const lower = localityName.toLowerCase();
+  return query
+    .split(',')
+    .map(p => p.trim())
+    .filter(p => p.toLowerCase() !== lower)
+    .join(', ');
+}
+
+async function fetchGeocode(queryStr) {
+  const url = new URL(ENDPOINT);
+  url.searchParams.set('address', queryStr);
+  url.searchParams.set('key', process.env.GOOGLE_API_KEY);
+  url.searchParams.set('region', 'ke');
+
+  let res;
+  try {
+    res = await fetch(url.toString());
+  } catch {
+    await new Promise(r => setTimeout(r, 1500));
+    res = await fetch(url.toString());
+  }
+  if (res.status >= 500) {
+    await new Promise(r => setTimeout(r, 1500));
+    res = await fetch(url.toString());
+  }
+  if (!res.ok) throw new Error(`Geocoding API HTTP ${res.status}`);
+  return res.json();
+}
+
 // Returns { lat, lon, formatted, placeId } or throws a user-readable Error.
 // Results are persisted in SQLite (place_id permanently; lat/lon for 30 days per ToS).
 // On a cache hit with fresh coordinates, no API call is made.
@@ -28,32 +60,50 @@ export async function geocode(place) {
     // Coordinates stale — re-geocode; but the place_id is still valid for pool queries.
   }
 
-  const url = new URL(ENDPOINT);
-  url.searchParams.set('address', rawQuery);
-  url.searchParams.set('key', process.env.GOOGLE_API_KEY);
-  url.searchParams.set('region', 'ke');
-
+  const TOO_VAGUE = ['country', 'administrative_area_level_1', 'administrative_area_level_2'];
   const t0 = Date.now();
-  let res;
-  try {
-    res = await fetch(url.toString());
-  } catch {
-    await new Promise(r => setTimeout(r, 1500));
-    res = await fetch(url.toString());
-  }
-  if (res.status >= 500) {
-    await new Promise(r => setTimeout(r, 1500));
-    res = await fetch(url.toString());
-  }
-  if (!res.ok) throw new Error(`Geocoding API HTTP ${res.status}`);
 
-  const data = await res.json();
+  let data = await fetchGeocode(rawQuery);
 
   if (data.status === 'ZERO_RESULTS') throw new GeocodeNotFoundError(place);
   if (data.status !== 'OK') throw new Error(`Geocoding API: ${data.status} — ${data.error_message ?? ''}`);
 
+  // When Google resolves a suburb query to the containing city (type: locality), retry
+  // without the city component so the suburb gets its own geocode result.
+  // Only retries when the query contained content *before* the matched city name —
+  // a bare "Nairobi, Kenya" query is a valid locality request and passes through.
+  const firstTypes = data.results[0].types ?? [];
+  if (firstTypes.includes('locality')) {
+    const localityComp = (data.results[0].address_components ?? [])
+      .find(c => c.types.includes('locality'));
+    const localityName = localityComp?.long_name ?? null;
+    const queryLower   = rawQuery.toLowerCase();
+    const localityIdx  = localityName ? queryLower.indexOf(localityName.toLowerCase()) : -1;
+
+    if (localityName && localityIdx > 0) {
+      // Query was more specific than the city — strip city and retry.
+      const retryQuery = stripLocality(rawQuery, localityName);
+      logger.debug({ original: rawQuery, retry: retryQuery }, 'geocode locality fallback');
+      const retryData = await fetchGeocode(retryQuery);
+
+      if (retryData.status === 'OK') {
+        const retryTypes = retryData.results[0].types ?? [];
+        const retryVague = TOO_VAGUE.some(t => retryTypes.includes(t)) || retryTypes.includes('locality');
+        if (!retryVague) {
+          data = retryData; // use the more specific result
+        } else {
+          throw new GeocodeNotFoundError(place);
+        }
+      } else if (retryData.status !== 'ZERO_RESULTS') {
+        throw new Error(`Geocoding API: ${retryData.status} — ${retryData.error_message ?? ''}`);
+      } else {
+        throw new GeocodeNotFoundError(place);
+      }
+    }
+    // locality query with nothing more specific before it — fall through normally.
+  }
+
   const types = data.results[0].types ?? [];
-  const TOO_VAGUE = ['country', 'administrative_area_level_1', 'administrative_area_level_2'];
   if (TOO_VAGUE.some(t => types.includes(t))) throw new GeocodeNotFoundError(place);
 
   const { lat, lng } = data.results[0].geometry.location;
