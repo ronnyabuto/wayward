@@ -165,6 +165,13 @@ bot.on('message', async (msg) => {
     if (intent.command === 'watch') {
       const t = intent.threshold;
       if (!t || t < 1 || t > 300) {
+        // No explicit threshold: "tell me when traffic clears" is depart semantics —
+        // handleDepart auto-sets the threshold at ceil(typicalMin * 1.2) and watches
+        // until it's met. Only fall back to asking if we have no locations either.
+        if (intent.origin && intent.destination) {
+          await handleDepart(bot, chatId, intent.origin, intent.destination, null, userId);
+          return;
+        }
         await bot.sendMessage(chatId, 'Got it — what travel time are you aiming for? (e.g. "alert me when it\'s under 40 min")');
         return;
       }
