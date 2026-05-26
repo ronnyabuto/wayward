@@ -6,6 +6,18 @@ Works in private chats and Telegram groups. Type in plain text.
 
 ---
 
+## How it's built
+
+Nairobi has no conversational traffic tool that works in plain text, Swahili, and Sheng. Everything else requires opening an app and already knowing your route.
+
+NLP runs two layers. A regex pre-filter handles unambiguous "X to Y" patterns — around 60% of real messages — without a Gemini call. Ambiguous phrasing, saved-place aliases, arrival deadlines, and conversation carry-forward go to the model. Flash-lite over flash was a quota call: 4× more daily free requests, a third of the cost, negligible quality difference for temperature-0 schema-constrained classification.
+
+Conversation history is persisted to SQLite. Retrieval is a hybrid: the 5 most recent turns always included, older turns surfaced by FTS5 keyword match scored by temporal decay. "What about from Westlands instead?" works across restarts. The FTS index stays in sync via SQLite triggers, not application code.
+
+One thing that doesn't scale: routes are keyed on the raw NLP-extracted place name string. Two users spelling the same place differently accumulate separate history. Fine for now — would need a coordinate-based canonical key at scale.
+
+---
+
 ## Usage
 
 **Check traffic and compare routes**
@@ -168,11 +180,9 @@ Plain text handles everything above. Slash commands are for management.
 
 ## Caveats
 
-**Gemini free tier caps at 20 requests per day per project.** Simple "X to Y" queries are classified locally and don't count against this. Queries involving saved places, arrival deadlines, conversation context, or ambiguous phrasing go through Gemini. Add billing to the Google Cloud project to remove the cap — the key itself doesn't change.
+**Gemini free tier is 1,000 requests per day on new keys.** Older keys provisioned before Google raised the quota may still be on 20 RPD — check AI Studio → Rate Limits if you hit caps sooner than expected. Simple "X to Y" queries are classified locally and don't count against this; ambiguous phrasing, saved-place resolution, and conversation context do. Add billing to remove the cap — the key itself doesn't change.
 
 **Matatu conditions are inferred from road traffic, not live vehicle data.** NTSA's GPS tracking system is not publicly accessible. Road congestion is a reliable proxy (matatus share the same roads) but won't catch stage-specific delays or route cancellations.
-
-**Conversation context is in-memory only.** Five turns per chat, cleared on restart. "What about from Westlands instead?" works within a session; after a restart the bot has no memory of prior messages.
 
 **Watches fail-safe after 6 consecutive failures.** If the traffic API is unreachable for an hour (6 × 10-minute polls), the watch cancels itself and sends a notification.
 
