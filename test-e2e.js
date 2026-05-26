@@ -790,6 +790,29 @@ await test('NLP [corridor]: Ngong Road corridor with explicit origin/dest', asyn
   console.log(`       origin="${i.origin}", corridor="${i.corridor ?? 'null'}"`);
 });
 
+await test('NLP [watch→depart]: "tell me when traffic clears" (no threshold) → depart, not watch', async () => {
+  // No explicit minute count — Gemini must not invent a threshold. Should classify as depart.
+  const i = await parseAndLog('I\'m at sarit center. I want to go to the hub karen. tell me when traffic clears.');
+  assert(i.command === 'depart', `Expected depart, got ${i.command} (threshold=${i.threshold})`);
+  assert(i.origin?.toLowerCase().includes('sarit'), `Origin should be Sarit Centre: ${i.origin}`);
+  assert(i.destination?.toLowerCase().includes('hub') || i.destination?.toLowerCase().includes('karen'), `Destination should be The Hub Karen: ${i.destination}`);
+  console.log(`       origin="${i.origin}" destination="${i.destination}"`);
+});
+
+await test('NLP [context carry-forward]: "when should I leave?" after watch → depart with both locations', async () => {
+  const history = [
+    {
+      userMessage: "I'm at sarit center. I want to go to the hub karen. tell me when traffic clears.",
+      modelResponse: JSON.stringify({ command: 'watch', origin: 'Sarit Centre, Westlands, Nairobi, Kenya', destination: 'The Hub, Karen, Nairobi, Kenya', threshold: 30, arrive_by: null, place_name: null, place_address: null, route_number: null, corridor: null, clarification: null }),
+    },
+  ];
+  const i = await parseIntent('when should I leave?', {}, history);
+  assert(i.command === 'depart', `Expected depart, got ${i.command}`);
+  assert(i.origin?.toLowerCase().includes('sarit'), `Origin should carry forward (Sarit Centre): ${i.origin}`);
+  assert(i.destination?.toLowerCase().includes('hub') || i.destination?.toLowerCase().includes('karen'), `Destination should carry forward (The Hub Karen): ${i.destination}`);
+  console.log(`       origin="${i.origin}" dest="${i.destination}"`);
+});
+
 await test('NLP [Swahili]: "naenda town kutoka Westlands" → check/depart with correct O/D', async () => {
   const i = await parseAndLog('naenda town kutoka Westlands');
   assert(['check', 'depart'].includes(i.command),
@@ -826,6 +849,28 @@ await test('Traffic: parallel future forecasts all return valid results', async 
       console.log(`       +${offsets[i]}min: ${Math.round(r.value.seconds / 60)} min`);
     }
   });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+await test('depart [fmtTime]: noon in Nairobi formats as 12:xx not 00:xx', () => {
+  // en-KE ICU data on some runtimes renders noon as "00:xx pm". Verify the fix.
+  const noon = new Date('2026-05-26T09:00:00Z'); // 09:00 UTC = 12:00 Nairobi (UTC+3)
+  const s = noon.toLocaleTimeString('en-KE', {
+    hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Africa/Nairobi',
+  }).replace(/^00:/, '12:');
+  assert(!s.startsWith('00:'), `Noon should not format as 00:xx — got: "${s}"`);
+  assert(s.startsWith('12:'), `Noon should format as 12:xx — got: "${s}"`);
+  console.log(`       Noon in Nairobi formats as: "${s}"`);
+});
+
+await test('depart [fmtTime]: midnight in Nairobi formats as 12:xx not 00:xx', () => {
+  const midnight = new Date('2026-05-25T21:00:00Z'); // 21:00 UTC = 00:00 Nairobi
+  const s = midnight.toLocaleTimeString('en-KE', {
+    hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Africa/Nairobi',
+  }).replace(/^00:/, '12:');
+  assert(!s.startsWith('00:'), `Midnight should not format as 00:xx — got: "${s}"`);
+  console.log(`       Midnight in Nairobi formats as: "${s}"`);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

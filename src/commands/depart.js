@@ -9,9 +9,11 @@ const BUFFER_MIN = 8;       // minutes subtracted from latest departure as a par
 const FAR_FUTURE_MIN = 240; // deadlines > 4 h away use predictive traffic, not current
 
 function fmtTime(date) {
-  return date.toLocaleTimeString('en-KE', {
+  const s = date.toLocaleTimeString('en-KE', {
     hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Africa/Nairobi',
   });
+  // en-KE ICU data renders noon/midnight as "00:xx" instead of "12:xx" on some runtimes.
+  return s.replace(/^00:/, '12:');
 }
 
 // Parse an NLP-produced "HH:MM" (Nairobi local 24 h) into a UTC Date.

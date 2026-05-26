@@ -177,6 +177,7 @@ Resolving saved locations:
 Key distinctions:
 - "when should I leave in the next 20 min" → "check" (20 min is a departure window, not an arrival deadline)
 - "tell me when it drops under 20 min" → "watch" with threshold 20
+- "tell me when traffic clears" / "notify me when traffic eases" (no explicit threshold) → "depart" with arrive_by null — depart auto-sets the threshold; never invent a threshold for watch
 - "I'm done at work, heading home" → "depart" with arrive_by null
 - "I want to be at Geco before 6pm" → "depart" with arrive_by "18:00"
 - "I need to be at work by 9" → "depart" with arrive_by "09:00"
@@ -184,6 +185,7 @@ Key distinctions:
 - "I need to get there in the next 45 minutes" → "depart" with arrive_by = current time + 45 min as HH:MM
 - "my home is at Seresponda Court" → "setplace" with place_name "home" and place_address "Seresponda Court"
 - Prior turn was depart with origin=null, user replies "Jalde apartments in OJ, bypass (ruiru)" → depart, origin="Jalde Apartments, OJ, Ruiru, Kenya", destination=(carry forward), arrive_by=(carry forward). Never setplace.
+- Prior turn was watch with origin="Sarit Centre, Westlands, Nairobi, Kenya" and destination="The Hub, Karen, Nairobi, Kenya", user says "when should I leave?" → depart, origin="Sarit Centre, Westlands, Nairobi, Kenya", destination="The Hub, Karen, Nairobi, Kenya", arrive_by=null.
 - "how thika road looking right now from kahawa sukari to cbd?" → check, origin="Kahawa Sukari, Nairobi, Kenya", destination="Nairobi CBD, Kenya", corridor="Thika Road"
 - "Ngong Road traffic from Karen to town" → check, origin="Karen, Nairobi, Kenya", destination="Nairobi CBD, Kenya", corridor="Ngong Road"
 - "matatu on Mombasa Road from EPZ to CBD" → matatu, origin="Export Processing Zone, Athi River, Kenya", destination="Nairobi CBD, Kenya", corridor="Mombasa Road"
@@ -202,6 +204,7 @@ Other rules:
 - Do not add any text outside the JSON object. No markdown, no explanation.
 
 Conversation context:
+- Prior model turns contain JSON intent objects. When the current message lacks explicit location names, read origin and destination from the most recent prior model turn's JSON to carry them forward. For example, if the prior model turn contains "origin":"Sarit Centre, Westlands, Nairobi, Kenya" and the current message is "when should I leave?", use that origin.
 - You may receive a history of prior turns. Use it to resolve references: "what about from Westlands instead?" carries the previous destination forward with a new origin; "that route" uses the last origin/destination pair; "same time" reuses the previous threshold.
 - When the user changes only one location ("go to X instead", "from Y instead"), carry the unchanged location forward from the prior turn exactly as it appeared — do not ask about it again.
 - Always produce complete, unambiguous origin and destination values in your output for routing commands.
@@ -248,7 +251,23 @@ export async function parseIntent(userMessage, savedPlaces = {}, conversationHis
     ? `User's saved locations:\n${placesLines}`
     : `User has no saved locations yet.`;
 
-  const userContent = `${placesContext}\nCurrent local time: ${now}\n\n${userMessage}`;
+  // If the most recent turn had a known route, surface it explicitly in the user content
+  // so the model doesn't have to parse JSON from its own prior turns (unreliable at thinkingBudget:0).
+  let lastRoute = null;
+  for (let j = conversationHistory.length - 1; j >= 0; j--) {
+    try {
+      const prev = JSON.parse(conversationHistory[j].modelResponse);
+      if (prev.origin || prev.destination) {
+        lastRoute = { origin: prev.origin, destination: prev.destination };
+        break;
+      }
+    } catch { /* skip malformed */ }
+  }
+  const routeCtx = lastRoute
+    ? `\nMost recent route from context: origin="${lastRoute.origin ?? 'unknown'}", destination="${lastRoute.destination ?? 'unknown'}".`
+    : '';
+
+  const userContent = `${placesContext}\nCurrent local time: ${now}${routeCtx}\n\n${userMessage}`;
 
   // Build multi-turn contents: prior turns first, then the current message.
   // Model turns store the raw JSON string so Gemini can resolve forward references.
