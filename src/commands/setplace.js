@@ -1,6 +1,23 @@
 import { geocode, GeocodeNotFoundError } from '../utils/geocode.js';
 import { dbSetPlace, dbGetSavedPlaces } from '../db.js';
 
+// Geocodes addressStr and returns the formatted address, or null on error (error
+// message already sent to chatId). Used by the NLP confirmation flow in bot.js.
+export async function geocodePlace(bot, chatId, addressStr) {
+  try {
+    const result = await geocode(addressStr.trim());
+    return result.formatted;
+  } catch (err) {
+    if (err instanceof GeocodeNotFoundError) {
+      await bot.sendMessage(chatId, err.message);
+    } else {
+      console.error('setplace geocode error:', err.message);
+      await bot.sendMessage(chatId, 'Something went wrong looking up that address. Try again in a moment.');
+    }
+    return null;
+  }
+}
+
 // Handles both the NLP path (handleSetPlace) and the /setplace slash command.
 // userId: in group chats, saved places are stored per user (msg.from.id) so each
 // person's "home" and "work" follow them across private and group conversations.

@@ -5,10 +5,10 @@ import { handleScenic } from './commands/scenic.js';
 import { handleCheck } from './commands/check.js';
 import { handleDepart } from './commands/depart.js';
 import { handleMatatu } from './commands/matatu.js';
-import { handleSetPlace, registerSetPlace, registerListPlaces } from './commands/setplace.js';
+import { handleSetPlace, registerSetPlace, registerListPlaces, geocodePlace } from './commands/setplace.js';
 import { startScheduler, loadWatchesFromDb } from './scheduler.js';
 import { parseIntent, quickClassify } from './utils/nlp.js';
-import { initDb, dbGetSavedPlaces, dbPersistTurn, dbRetrieveRelevantTurns } from './db.js';
+import { initDb, dbGetSavedPlaces, dbSetPlace, dbPersistTurn, dbRetrieveRelevantTurns } from './db.js';
 
 const { TELEGRAM_BOT_TOKEN } = process.env;
 
@@ -35,6 +35,10 @@ registerSetPlace(bot);
 registerListPlaces(bot);
 startScheduler(bot);
 
+// Pending setplace confirmations keyed by userId.
+// Volatile — cleared on restart; the user just resends if that happens.
+const pendingSetPlace = new Map();
+
 // Free-form messages — anything that didn't match an explicit /command.
 bot.on('message', async (msg) => {
   const text = msg.text?.trim();
@@ -49,6 +53,26 @@ bot.on('message', async (msg) => {
   const userId = isGroup ? (msg.from?.id ?? chatId) : chatId;
 
   try {
+    // Confirmation gate: if this user has a pending setplace, resolve it first.
+    const pending = pendingSetPlace.get(userId);
+    if (pending) {
+      const reply = text.toLowerCase().trim();
+      pendingSetPlace.delete(userId);
+      if (/^(yes|yeah|yep|sure|ok|okay|confirm|y)$/.test(reply)) {
+        dbSetPlace(userId, pending.placeName, pending.formattedAddress);
+        await bot.sendMessage(
+          chatId,
+          `Got it. "${pending.placeName}" saved as: ${pending.formattedAddress}\n\nYou can now say things like "I'm done at work, heading home" and I'll know where to check.`
+        );
+        return;
+      }
+      if (/^(no|nope|cancel|nah|n)$/.test(reply)) {
+        await bot.sendMessage(chatId, 'Cancelled.');
+        return;
+      }
+      // Any other reply: treat as a new message (fall through to NLP path below).
+    }
+
     // Layer 1: regex pre-filter — handles unambiguous "X to Y" patterns without
     // spending a Gemini request. Falls through to Gemini when uncertain.
     const quick = quickClassify(text);
@@ -93,7 +117,11 @@ bot.on('message', async (msg) => {
     }
 
     if (intent.command === 'setplace') {
-      await handleSetPlace(bot, chatId, intent.place_name, intent.place_address, userId);
+      const formatted = await geocodePlace(bot, chatId, intent.place_address);
+      if (!formatted) return;
+      const name = intent.place_name.toLowerCase().trim();
+      pendingSetPlace.set(userId, { placeName: name, formattedAddress: formatted });
+      await bot.sendMessage(chatId, `Save "${name}" as: ${formatted}? Reply yes to confirm or no to cancel.`);
       return;
     }
 

@@ -10,6 +10,7 @@ import { initDb, dbGetSavedPlaces, dbSetPlace, dbLogTraffic, dbGetPersonalTypica
          dbUpsertFact, dbGetActiveFacts,
          dbLogDeparture, dbGetTypicalDepartureHour } from './src/db.js';
 import { geocode, GeocodeNotFoundError } from './src/utils/geocode.js';
+import { geocodePlace } from './src/commands/setplace.js';
 import { getDurationSeconds } from './src/services/traffic.js';
 import { parseIntent, quickClassify } from './src/utils/nlp.js';
 import { getNairobiComponents } from './src/utils/time.js';
@@ -492,6 +493,27 @@ await test('NLP: "save my work as ABC Place, Westlands" → setplace', async () 
   const i = await parseAndLog('save my work as ABC Place, Westlands');
   assert(i.command === 'setplace', `Expected setplace, got ${i.command}`);
   assert(i.place_name?.toLowerCase() === 'work', `place_name should be work: ${i.place_name}`);
+});
+
+await test('setplace [confirmation]: geocodePlace resolves Nairobi address', async () => {
+  // geocodePlace is the first step in the confirmation flow — must return a non-empty string
+  const formatted = await geocodePlace(null, null, 'Seresponda Court, Kiambu Road, Nairobi');
+  assert(typeof formatted === 'string' && formatted.length > 0, `Expected formatted address string, got: ${formatted}`);
+  assert(formatted.toLowerCase().includes('kenya'), `Expected "Kenya" in formatted address: ${formatted}`);
+  console.log(`       formatted: ${formatted}`);
+});
+
+await test('NLP [setplace guard]: bare location after depart-prompt → depart, not setplace', async () => {
+  // Prior turn: bot asked "Where are you leaving from?" after a depart with null origin.
+  // User replies with just an address. Must fill the origin slot, not trigger setplace.
+  const history = [
+    { userMessage: 'I need to be at JKIA by 12noon', modelResponse: JSON.stringify({ command: 'depart', origin: null, destination: 'Jomo Kenyatta International Airport, Nairobi, Kenya', arrive_by: '12:00' }) },
+  ];
+  const i = await parseIntent('Jalde apartments in OJ, bypass ruiru', {}, history);
+  assert(i.command !== 'setplace', `Should NOT classify as setplace; got ${i.command} place_name=${i.place_name}`);
+  assert(i.command === 'depart', `Expected depart, got ${i.command}`);
+  assert(i.origin?.toLowerCase().includes('ruiru') || i.origin?.toLowerCase().includes('oj'), `Origin should be in Ruiru/OJ area: ${i.origin}`);
+  console.log(`       origin=${i.origin} dest=${i.destination}`);
 });
 
 // --- scenic ---
