@@ -260,19 +260,32 @@ async function handleDepartWithDeadline(
     return;
   }
 
-  // Normal or light traffic.
+  // Normal or light traffic — schedule a live check 15 min before departure.
+  const watchThreshold = Math.ceil(baselineMin * ACCEPTABLE_RATIO);
+  const arriveAtSec    = Math.floor(arriveByDate.getTime() / 1000);
+  const checkAt        = Math.floor(latestDep.getTime() / 1000) - 15 * 60;
+  const hasTimeForCheck = checkAt > Math.floor(Date.now() / 1000) + 60;
+
+  let checkTimeNote = '';
+  if (hasTimeForCheck) {
+    const pendingId = dbInsertPendingIntent(
+      dbId, chatId, 'scheduled_watch',
+      originStr, destinationStr, watchThreshold, checkAt, arriveAtSec,
+      origin.placeId, destination.placeId,
+    );
+    scheduleTimedWatch(bot, {
+      id: pendingId, chat_id: chatId,
+      origin: originStr, destination: destinationStr,
+      threshold_min: watchThreshold, fire_at: checkAt, arrive_at_sec: arriveAtSec,
+      origin_place_id: origin.placeId ?? null, dest_place_id: destination.placeId ?? null,
+    });
+    checkTimeNote = `\n(I'll check again at ${fmtTime(new Date(checkAt * 1000))} and ping you with a live update.)`;
+  }
+
   await bot.sendMessage(
     chatId,
     `🟢 Leave by ${fmtTime(latestDep)} — ${minUntilLatest} min from now. ` +
     `Drive is ${currentMin} min${trafficCtx}, ` +
-    `so you'll arrive just before ${deadlineStr} with time to park and settle in.\n${mapsLink}`
-  );
-  // Store a watch offer so "can you ping me?" on the next message creates the watch
-  // without re-running the forecast.
-  const watchThreshold = Math.ceil(baselineMin * ACCEPTABLE_RATIO);
-  dbInsertPendingIntent(
-    dbId, chatId, 'watch_offer',
-    originStr, destinationStr, watchThreshold, null, null,
-    origin.placeId, destination.placeId,
+    `so you'll arrive just before ${deadlineStr} with time to park and settle in.${checkTimeNote}\n${mapsLink}`
   );
 }
