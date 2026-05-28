@@ -1,7 +1,8 @@
 import { getDurationSeconds } from '../services/traffic.js';
 import { geocode, GeocodeNotFoundError } from '../utils/geocode.js';
 import { commitWatch } from './watch.js';
-import { dbLogTraffic, dbGetPersonalTypical, dbLogTrafficPool, dbGetPoolTypical } from '../db.js';
+import { dbLogTraffic, dbGetPersonalTypical, dbLogTrafficPool, dbGetPoolTypical, dbInsertPendingIntent } from '../db.js';
+import { scheduleTimedWatch } from '../scheduler.js';
 import { getNairobiComponents } from '../utils/time.js';
 import { logger } from '../utils/logger.js';
 
@@ -182,13 +183,29 @@ async function handleDepartWithDeadline(
     } catch {
       predicted = null;
     }
-    const predictedMin = predicted ? Math.round(predicted.seconds / 60) : staticMin;
-    const latestDep = new Date(arriveByDate.getTime() - (predictedMin + BUFFER_MIN) * 60_000);
+    const predictedMin  = predicted ? Math.round(predicted.seconds / 60) : staticMin;
+    const latestDep     = new Date(arriveByDate.getTime() - (predictedMin + BUFFER_MIN) * 60_000);
+    // Start watching 2 h before the deadline so there's enough lead time for the
+    // watch to fire before the latest departure window closes.
+    const watchStartsAt = Math.floor((arriveByDate.getTime() - 2 * 60 * 60 * 1000) / 1000);
+    const watchThreshold = Math.ceil(predictedMin * ACCEPTABLE_RATIO);
+    const watchStartStr  = fmtTime(new Date(watchStartsAt * 1000));
+    const pendingId = dbInsertPendingIntent(
+      dbId, chatId, 'scheduled_watch',
+      originStr, destinationStr, watchThreshold, watchStartsAt,
+      origin.placeId, destination.placeId,
+    );
+    scheduleTimedWatch(bot, {
+      id: pendingId, chat_id: chatId,
+      origin: originStr, destination: destinationStr,
+      threshold_min: watchThreshold, fire_at: watchStartsAt,
+      origin_place_id: origin.placeId ?? null, dest_place_id: destination.placeId ?? null,
+    });
     await bot.sendMessage(
       chatId,
       `At ${fmtTime(probeDepTime)}, this route is predicted to take about ${predictedMin} min — ` +
       `plan to leave by ${fmtTime(latestDep)} to arrive before ${deadlineStr}.\n` +
-      `(Forecast based on typical traffic patterns; check again closer to the time.)\n${mapsLink}`
+      `(Forecast based on typical traffic patterns; I'll start watching at ${watchStartStr} and ping you when it's time to go.)\n${mapsLink}`
     );
     return;
   }
@@ -248,5 +265,13 @@ async function handleDepartWithDeadline(
     `🟢 Leave by ${fmtTime(latestDep)} — ${minUntilLatest} min from now. ` +
     `Drive is ${currentMin} min${trafficCtx}, ` +
     `so you'll arrive just before ${deadlineStr} with time to park and settle in.\n${mapsLink}`
+  );
+  // Store a watch offer so "can you ping me?" on the next message creates the watch
+  // without re-running the forecast.
+  const watchThreshold = Math.ceil(baselineMin * ACCEPTABLE_RATIO);
+  dbInsertPendingIntent(
+    dbId, chatId, 'watch_offer',
+    originStr, destinationStr, watchThreshold, null,
+    origin.placeId, destination.placeId,
   );
 }

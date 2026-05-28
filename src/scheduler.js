@@ -1,10 +1,46 @@
 import { getDurationSeconds } from './services/traffic.js';
-import { dbGetAllWatches, dbDeleteWatch, dbSetFailCount, dbLogTraffic, dbLogTrafficPool } from './db.js';
+import { dbGetAllWatches, dbDeleteWatch, dbSetFailCount, dbLogTraffic, dbLogTrafficPool,
+         dbGetScheduledPendingIntents, dbDeletePendingIntent } from './db.js';
+import { commitWatch } from './commands/watch.js';
 import { logger } from './utils/logger.js';
 
 export const watches = new Map();
 
+// setTimeout handles for scheduled_watch pending intents, keyed by pending_intent id.
+const pendingTimers = new Map();
+
 const POLL_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
+
+// Schedule a single pending_intents row to fire at row.fire_at.
+// Called both at startup (for rows restored from DB) and inline when a new
+// far-future depart creates a scheduled_watch.
+export function scheduleTimedWatch(bot, row) {
+  const delayMs = Math.max(0, row.fire_at * 1000 - Date.now());
+  const handle = setTimeout(async () => {
+    pendingTimers.delete(row.id);
+    dbDeletePendingIntent(row.id);
+    commitWatch(row.chat_id, row.origin, row.destination, row.threshold_min,
+                row.origin_place_id ?? null, row.dest_place_id ?? null);
+    const originShort = row.origin.split(',')[0];
+    const destShort   = row.destination.split(',')[0];
+    try {
+      await bot.sendMessage(
+        row.chat_id,
+        `Starting your pre-arrival watch — I'll ping you when ${originShort} → ${destShort} drops under ${row.threshold_min} min.`,
+      );
+    } catch (err) {
+      logger.warn({ err, chatId: row.chat_id }, 'scheduled watch start notify failed');
+    }
+  }, delayMs);
+  pendingTimers.set(row.id, handle);
+}
+
+// Restore scheduled watches from DB after a PM2 restart.
+export function loadScheduledPendingIntents(bot) {
+  const rows = dbGetScheduledPendingIntents();
+  for (const row of rows) scheduleTimedWatch(bot, row);
+  if (rows.length > 0) logger.info({ count: rows.length }, 'Restored scheduled watches from database.');
+}
 
 export function loadWatchesFromDb() {
   for (const row of dbGetAllWatches()) {

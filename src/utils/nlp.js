@@ -189,6 +189,8 @@ Key distinctions:
 - "my home is at Seresponda Court" → "setplace" with place_name "home" and place_address "Seresponda Court"
 - Prior turn was depart with origin=null, user replies "Jalde apartments in OJ, bypass (ruiru)" → depart, origin="Jalde Apartments, OJ, Ruiru, Kenya", destination=(carry forward), arrive_by=(carry forward). Never setplace.
 - Prior turn was watch with origin="Sarit Centre, Westlands, Nairobi, Kenya" and destination="The Hub, Karen, Nairobi, Kenya", user says "when should I leave?" → depart, origin="Sarit Centre, Westlands, Nairobi, Kenya", destination="The Hub, Karen, Nairobi, Kenya", arrive_by=null.
+- Prior turn was depart with arrive_by="21:00", user says "can you ping at that time?" or "remind me" or "set up the alert" → watch, origin=(carry forward), destination=(carry forward), threshold=null. This is a request to activate a watch for the previously calculated route, not to re-run the forecast.
+- Prior turn was depart with arrive_by set, user says "ping me when to leave" or "let me know when it's time" → watch, origin=(carry forward), destination=(carry forward), threshold=null.
 - "how thika road looking right now from kahawa sukari to cbd?" → check, origin="Kahawa Sukari, Nairobi, Kenya", destination="Nairobi CBD, Kenya", corridor="Thika Road"
 - "Ngong Road traffic from Karen to town" → check, origin="Karen, Nairobi, Kenya", destination="Nairobi CBD, Kenya", corridor="Ngong Road"
 - "matatu on Mombasa Road from EPZ to CBD" → matatu, origin="Export Processing Zone, Athi River, Kenya", destination="Nairobi CBD, Kenya", corridor="Mombasa Road"

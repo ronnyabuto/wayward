@@ -136,6 +136,29 @@ export function initDb() {
 
     CREATE INDEX IF NOT EXISTS idx_pool_lookup
       ON traffic_pool (origin_place_id, destination_place_id, day_of_week, hour_slot, recorded_at);
+
+    -- Pending intents: the bot's working memory of promises made to the user.
+    -- Two types:
+    --   'watch_offer'    – bot just gave a departure forecast; expires in 30 min.
+    --                      If user confirms ("ping me", "yes"), creates a watch immediately.
+    --   'scheduled_watch'– bot promised to start watching at fire_at (Unix epoch sec).
+    --                      Startup loader restores these after PM2 restarts.
+    CREATE TABLE IF NOT EXISTS pending_intents (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      chat_id         INTEGER NOT NULL,
+      user_id         INTEGER NOT NULL,
+      intent_type     TEXT    NOT NULL,
+      origin          TEXT    NOT NULL,
+      destination     TEXT    NOT NULL,
+      threshold_min   INTEGER,
+      fire_at         INTEGER,
+      origin_place_id TEXT,
+      dest_place_id   TEXT,
+      created_at      INTEGER NOT NULL,
+      expires_at      INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_pending_user ON pending_intents (user_id, expires_at);
+    CREATE INDEX IF NOT EXISTS idx_pending_fire ON pending_intents (fire_at) WHERE fire_at IS NOT NULL;
   `);
 
   // Migrate traffic_pool: if it was created without the id column (old composite PK),
@@ -157,6 +180,31 @@ export function initDb() {
       );
       CREATE INDEX IF NOT EXISTS idx_pool_lookup
         ON traffic_pool (origin_place_id, destination_place_id, day_of_week, hour_slot, recorded_at);
+    `);
+  }
+
+  // Migrate pending_intents: add table if this is an existing install without it.
+  const hasPendingIntents = db.prepare(
+    `SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='pending_intents'`
+  ).get().n;
+  if (!hasPendingIntents) {
+    db.exec(`
+      CREATE TABLE pending_intents (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id         INTEGER NOT NULL,
+        user_id         INTEGER NOT NULL,
+        intent_type     TEXT    NOT NULL,
+        origin          TEXT    NOT NULL,
+        destination     TEXT    NOT NULL,
+        threshold_min   INTEGER,
+        fire_at         INTEGER,
+        origin_place_id TEXT,
+        dest_place_id   TEXT,
+        created_at      INTEGER NOT NULL,
+        expires_at      INTEGER NOT NULL
+      );
+      CREATE INDEX idx_pending_user ON pending_intents (user_id, expires_at);
+      CREATE INDEX idx_pending_fire ON pending_intents (fire_at) WHERE fire_at IS NOT NULL;
     `);
   }
 
@@ -248,6 +296,48 @@ export function dbDeleteWatch(id) {
 
 export function dbSetFailCount(id, failCount) {
   db.prepare('UPDATE watches SET fail_count = ? WHERE id = ?').run(failCount, id);
+}
+
+// ── Pending intents ───────────────────────────────────────────────────────────
+
+// Returns the inserted row id.
+export function dbInsertPendingIntent(userId, chatId, intentType, origin, destination, thresholdMin, fireAt, originPlaceId, destPlaceId) {
+  const now = Math.floor(Date.now() / 1000);
+  // watch_offer: 30-min TTL. scheduled_watch: expires 1 h after fire_at so it
+  // auto-cleans if the process was down when the timer was supposed to fire.
+  const expiresAt = fireAt ? fireAt + 3600 : now + 1800;
+  const { lastInsertRowid } = db.prepare(`
+    INSERT INTO pending_intents
+      (chat_id, user_id, intent_type, origin, destination, threshold_min, fire_at,
+       origin_place_id, dest_place_id, created_at, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(chatId, userId, intentType, origin, destination, thresholdMin ?? null,
+         fireAt ?? null, originPlaceId ?? null, destPlaceId ?? null, now, expiresAt);
+  return Number(lastInsertRowid);
+}
+
+// Returns the most recent non-expired pending intent for this user, or null.
+export function dbGetActivePendingIntent(userId) {
+  const now = Math.floor(Date.now() / 1000);
+  return db.prepare(`
+    SELECT * FROM pending_intents
+    WHERE user_id = ? AND expires_at > ?
+    ORDER BY created_at DESC LIMIT 1
+  `).get(userId, now) ?? null;
+}
+
+export function dbDeletePendingIntent(id) {
+  db.prepare('DELETE FROM pending_intents WHERE id = ?').run(id);
+}
+
+// Returns all scheduled_watch rows whose fire_at is still in the future.
+// Called on startup to restore timers after a PM2 restart.
+export function dbGetScheduledPendingIntents() {
+  const now = Math.floor(Date.now() / 1000);
+  return db.prepare(`
+    SELECT * FROM pending_intents
+    WHERE intent_type = 'scheduled_watch' AND fire_at IS NOT NULL AND fire_at > ?
+  `).all(now);
 }
 
 // ── Saved places ──────────────────────────────────────────────────────────────

@@ -1,15 +1,16 @@
 import 'dotenv/config';
 import TelegramBot from 'node-telegram-bot-api';
 import { logger } from './utils/logger.js';
-import { registerStopwatch, registerListWatches, handleWatch } from './commands/watch.js';
+import { registerStopwatch, registerListWatches, handleWatch, commitWatch } from './commands/watch.js';
 import { handleScenic } from './commands/scenic.js';
 import { handleCheck } from './commands/check.js';
 import { handleDepart } from './commands/depart.js';
 import { handleMatatu } from './commands/matatu.js';
 import { handleSetPlace, registerSetPlace, registerListPlaces, geocodePlace } from './commands/setplace.js';
-import { startScheduler, loadWatchesFromDb } from './scheduler.js';
+import { startScheduler, loadWatchesFromDb, loadScheduledPendingIntents } from './scheduler.js';
 import { parseIntent, quickClassify } from './utils/nlp.js';
-import { initDb, dbGetSavedPlaces, dbSetPlace, dbPersistTurn, dbRetrieveRelevantTurns } from './db.js';
+import { initDb, dbGetSavedPlaces, dbSetPlace, dbPersistTurn, dbRetrieveRelevantTurns,
+         dbGetActivePendingIntent, dbDeletePendingIntent } from './db.js';
 
 const { TELEGRAM_BOT_TOKEN } = process.env;
 
@@ -35,6 +36,7 @@ registerListWatches(bot);
 registerSetPlace(bot);
 registerListPlaces(bot);
 startScheduler(bot);
+loadScheduledPendingIntents(bot);
 
 // Pending setplace confirmations keyed by userId.
 // Volatile — cleared on restart; the user just resends if that happens.
@@ -72,6 +74,36 @@ bot.on('message', async (msg) => {
         return;
       }
       // Any other reply: treat as a new message (fall through to NLP path below).
+    }
+
+    // Pending intent gate: resolve "can you ping me?" / "remind me" follow-ups
+    // without re-running the full NLP pipeline.
+    const pendingIntent = dbGetActivePendingIntent(userId);
+    if (pendingIntent) {
+      const isConfirmation = /\b(ping|alert|remind|notify|tell\s*me|message\s*me|yes|yeah|sure|ok|okay|do\s*(that|it)|set\s*(that|it)\s*up)\b/i.test(text);
+
+      if (pendingIntent.intent_type === 'scheduled_watch' && isConfirmation) {
+        const timeStr = new Date(pendingIntent.fire_at * 1000)
+          .toLocaleTimeString('en-KE', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Africa/Nairobi' })
+          .replace(/^00:/, '12:');
+        await bot.sendMessage(chatId, `Already on it — I'll start watching at ${timeStr} and ping you when it's time to leave.`);
+        dbPersistTurn(userId, chatId, text, JSON.stringify({ command: 'watch', origin: pendingIntent.origin, destination: pendingIntent.destination, threshold: pendingIntent.threshold_min }));
+        return;
+      }
+
+      if (pendingIntent.intent_type === 'watch_offer') {
+        if (isConfirmation) {
+          dbDeletePendingIntent(pendingIntent.id);
+          commitWatch(chatId, pendingIntent.origin, pendingIntent.destination, pendingIntent.threshold_min, pendingIntent.origin_place_id ?? null, pendingIntent.dest_place_id ?? null);
+          const oShort = pendingIntent.origin.split(',')[0];
+          const dShort = pendingIntent.destination.split(',')[0];
+          await bot.sendMessage(chatId, `Watch set. I'll message you when ${oShort} → ${dShort} drops under ${pendingIntent.threshold_min} min.`);
+          dbPersistTurn(userId, chatId, text, JSON.stringify({ command: 'watch', origin: pendingIntent.origin, destination: pendingIntent.destination, threshold: pendingIntent.threshold_min }));
+          return;
+        }
+        // User moved on to something else — clear the stale offer before continuing.
+        dbDeletePendingIntent(pendingIntent.id);
+      }
     }
 
     // Layer 1: regex pre-filter — handles unambiguous "X to Y" patterns without
