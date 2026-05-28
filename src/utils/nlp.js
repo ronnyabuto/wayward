@@ -180,7 +180,8 @@ Resolving saved locations:
 Key distinctions:
 - "when should I leave in the next 20 min" → "check" (20 min is a departure window, not an arrival deadline)
 - "tell me when it drops under 20 min" → "watch" with threshold 20
-- "tell me when traffic clears" / "notify me when traffic eases" (no explicit threshold) → "depart" with arrive_by null — depart auto-sets the threshold; never invent a threshold for watch
+- "tell me when traffic clears" / "notify me when traffic eases" (no explicit threshold, no deadline) → "depart" with arrive_by null — depart auto-sets the threshold; never invent a threshold for watch
+- CRITICAL — notification framing + deadline: When a message contains both an arrival deadline AND notification verbs (ping/tell/remind/notify/alert me when to leave/go/head out), ALWAYS extract arrive_by from the deadline. Notification phrasing ("ping me when to leave") describes how the user wants to receive the result — it does not remove or override the deadline. Examples: "I have a 9am meeting, ping me when to leave" → depart, arrive_by="09:00". "I need to be at the airport by 3pm, tell me when to head out" → depart, arrive_by="15:00". "I start work at 8am tomorrow, remind me when to go" → depart, arrive_by="08:00". The distinction: notification phrasing ALONE with no deadline → depart, arrive_by=null. Notification phrasing + explicit deadline → depart, arrive_by set to that deadline.
 - "I'm done at work, heading home" → "depart" with arrive_by null
 - "I want to be at Geco before 6pm" → "depart" with arrive_by "18:00"
 - "I need to be at work by 9" → "depart" with arrive_by "09:00"
@@ -208,7 +209,7 @@ Other rules:
 - Do not add any text outside the JSON object. No markdown, no explanation.
 
 Conversation context:
-- Prior model turns contain JSON intent objects. When the current message lacks explicit location names, read origin and destination from the most recent prior model turn's JSON to carry them forward. For example, if the prior model turn contains "origin":"Sarit Centre, Westlands, Nairobi, Kenya" and the current message is "when should I leave?", use that origin.
+- Prior model turns contain JSON intent objects. Only carry route context forward when the current message has routing intent — it mentions travel, traffic, commute, departure, arrival, leaving, heading, driving, or asks about getting somewhere. If the message is off-topic (asking about time, news, weather, general questions unrelated to commuting), return "unknown" with a brief clarification; do NOT apply a prior route to it. When routing intent IS present and explicit location names are absent, read origin and destination from the most recent prior model turn's JSON to carry them forward. For example, if the prior model turn contains "origin":"Sarit Centre, Westlands, Nairobi, Kenya" and the current message is "when should I leave?", use that origin.
 - You may receive a history of prior turns. Use it to resolve references: "what about from Westlands instead?" carries the previous destination forward with a new origin; "that route" uses the last origin/destination pair; "same time" reuses the previous threshold.
 - When the user changes only one location ("go to X instead", "from Y instead"), carry the unchanged location forward from the prior turn exactly as it appeared — do not ask about it again.
 - Always produce complete, unambiguous origin and destination values in your output for routing commands.
@@ -257,15 +258,20 @@ export async function parseIntent(userMessage, savedPlaces = {}, conversationHis
 
   // If the most recent turn had a known route, surface it explicitly in the user content
   // so the model doesn't have to parse JSON from its own prior turns (unreliable at thinkingBudget:0).
+  // Only inject when the current message has routing intent — prevents off-topic messages
+  // ("what time is it?", greetings, etc.) from inheriting a route and triggering a traffic check.
+  const hasRoutingIntent = /\b(traffic|drive|driving|leave|leaving|head(?:ing)?|go(?:ing)?|commute|arriv|depart|get\s+to|from|road|route|travel|when\s+should|how\s+long|how\s+far|minute|min\b|jam|stuck|ping|remind|alert|notify|watch|check)\b/i.test(userMessage);
   let lastRoute = null;
-  for (let j = conversationHistory.length - 1; j >= 0; j--) {
-    try {
-      const prev = JSON.parse(conversationHistory[j].modelResponse);
-      if (prev.origin || prev.destination) {
-        lastRoute = { origin: prev.origin, destination: prev.destination };
-        break;
-      }
-    } catch { /* skip malformed */ }
+  if (hasRoutingIntent) {
+    for (let j = conversationHistory.length - 1; j >= 0; j--) {
+      try {
+        const prev = JSON.parse(conversationHistory[j].modelResponse);
+        if (prev.origin || prev.destination) {
+          lastRoute = { origin: prev.origin, destination: prev.destination };
+          break;
+        }
+      } catch { /* skip malformed */ }
+    }
   }
   const routeCtx = lastRoute
     ? `\nMost recent route from context: origin="${lastRoute.origin ?? 'unknown'}", destination="${lastRoute.destination ?? 'unknown'}".`
