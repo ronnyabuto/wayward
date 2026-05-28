@@ -80,7 +80,13 @@ bot.on('message', async (msg) => {
     // without re-running the full NLP pipeline.
     const pendingIntent = dbGetActivePendingIntent(userId);
     if (pendingIntent) {
-      const isConfirmation = /\b(ping|alert|remind|notify|tell\s*me|message\s*me|yes|yeah|sure|ok|okay|do\s*(that|it)|set\s*(that|it)\s*up)\b/i.test(text);
+      // A confirmation is short and has no routing structure.
+      // "tell me when to leave" embeds confirmation words in a new routing query —
+      // checking word count + routing verb + "to" pattern catches this.
+      const words = text.split(/\s+/).length;
+      const hasRoutingStructure = /\b(go|going|heading|drive|traffic|watch|check|monitor|want\s+to|need\s+to|take\s+me)\b.{0,60}\bto\b/i.test(text);
+      const isConfirmation = words <= 10 && !hasRoutingStructure &&
+        /\b(ping|alert|remind|notify|tell\s*me|message\s*me|yes|yeah|sure|ok|okay|do\s*(that|it)|set\s*(that|it)\s*up)\b/i.test(text);
 
       if (pendingIntent.intent_type === 'scheduled_watch' && isConfirmation) {
         const timeStr = new Date(pendingIntent.fire_at * 1000)

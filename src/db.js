@@ -152,6 +152,7 @@ export function initDb() {
       destination     TEXT    NOT NULL,
       threshold_min   INTEGER,
       fire_at         INTEGER,
+      arrive_at_sec   INTEGER,
       origin_place_id TEXT,
       dest_place_id   TEXT,
       created_at      INTEGER NOT NULL,
@@ -198,6 +199,7 @@ export function initDb() {
         destination     TEXT    NOT NULL,
         threshold_min   INTEGER,
         fire_at         INTEGER,
+        arrive_at_sec   INTEGER,
         origin_place_id TEXT,
         dest_place_id   TEXT,
         created_at      INTEGER NOT NULL,
@@ -206,6 +208,14 @@ export function initDb() {
       CREATE INDEX idx_pending_user ON pending_intents (user_id, expires_at);
       CREATE INDEX idx_pending_fire ON pending_intents (fire_at) WHERE fire_at IS NOT NULL;
     `);
+  }
+
+  // Migrate pending_intents: add arrive_at_sec if this is an existing install.
+  const pendingIntentCols = new Set(
+    db.prepare(`SELECT name FROM pragma_table_info('pending_intents')`).all().map(r => r.name)
+  );
+  if (!pendingIntentCols.has('arrive_at_sec')) {
+    db.exec(`ALTER TABLE pending_intents ADD COLUMN arrive_at_sec INTEGER`);
   }
 
   // Migrate watches table: add place_id columns if this is an existing install.
@@ -301,7 +311,7 @@ export function dbSetFailCount(id, failCount) {
 // ── Pending intents ───────────────────────────────────────────────────────────
 
 // Returns the inserted row id.
-export function dbInsertPendingIntent(userId, chatId, intentType, origin, destination, thresholdMin, fireAt, originPlaceId, destPlaceId) {
+export function dbInsertPendingIntent(userId, chatId, intentType, origin, destination, thresholdMin, fireAt, arriveAtSec, originPlaceId, destPlaceId) {
   const now = Math.floor(Date.now() / 1000);
   // watch_offer: 30-min TTL. scheduled_watch: expires 1 h after fire_at so it
   // auto-cleans if the process was down when the timer was supposed to fire.
@@ -309,10 +319,11 @@ export function dbInsertPendingIntent(userId, chatId, intentType, origin, destin
   const { lastInsertRowid } = db.prepare(`
     INSERT INTO pending_intents
       (chat_id, user_id, intent_type, origin, destination, threshold_min, fire_at,
-       origin_place_id, dest_place_id, created_at, expires_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       arrive_at_sec, origin_place_id, dest_place_id, created_at, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(chatId, userId, intentType, origin, destination, thresholdMin ?? null,
-         fireAt ?? null, originPlaceId ?? null, destPlaceId ?? null, now, expiresAt);
+         fireAt ?? null, arriveAtSec ?? null,
+         originPlaceId ?? null, destPlaceId ?? null, now, expiresAt);
   return Number(lastInsertRowid);
 }
 

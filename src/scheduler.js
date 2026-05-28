@@ -1,4 +1,13 @@
 import { getDurationSeconds } from './services/traffic.js';
+
+const BUFFER_MIN = 8;
+
+function fmtTime(date) {
+  const s = date.toLocaleTimeString('en-KE', {
+    hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Africa/Nairobi',
+  });
+  return s.replace(/^00:/, '12:');
+}
 import { dbGetAllWatches, dbDeleteWatch, dbSetFailCount, dbLogTraffic, dbLogTrafficPool,
          dbGetScheduledPendingIntents, dbDeletePendingIntent } from './db.js';
 import { commitWatch } from './commands/watch.js';
@@ -19,17 +28,65 @@ export function scheduleTimedWatch(bot, row) {
   const handle = setTimeout(async () => {
     pendingTimers.delete(row.id);
     dbDeletePendingIntent(row.id);
-    commitWatch(row.chat_id, row.origin, row.destination, row.threshold_min,
-                row.origin_place_id ?? null, row.dest_place_id ?? null);
-    const originShort = row.origin.split(',')[0];
-    const destShort   = row.destination.split(',')[0];
+
+    const originShort  = row.origin.split(',')[0];
+    const destShort    = row.destination.split(',')[0];
+    const arriveByDate = row.arrive_at_sec ? new Date(row.arrive_at_sec * 1000) : null;
+    const deadlineStr  = arriveByDate ? fmtTime(arriveByDate) : null;
+
+    // Live traffic check at departure time.
+    const routeOrigin = row.origin_place_id ? { placeId: row.origin_place_id } : row.origin;
+    const routeDest   = row.dest_place_id   ? { placeId: row.dest_place_id   } : row.destination;
+    let result;
     try {
-      await bot.sendMessage(
-        row.chat_id,
-        `Starting your pre-arrival watch — I'll ping you when ${originShort} → ${destShort} drops under ${row.threshold_min} min.`,
-      );
+      result = await getDurationSeconds(routeOrigin, routeDest);
     } catch (err) {
-      logger.warn({ err, chatId: row.chat_id }, 'scheduled watch start notify failed');
+      logger.warn({ err, chatId: row.chat_id }, 'scheduled watch traffic check failed');
+      result = null;
+    }
+
+    try {
+      if (!result) {
+        // Can't reach the API — fall back to continuous polling.
+        commitWatch(row.chat_id, row.origin, row.destination, row.threshold_min,
+                    row.origin_place_id ?? null, row.dest_place_id ?? null);
+        await bot.sendMessage(row.chat_id,
+          `Couldn't check traffic right now — watching ${originShort} → ${destShort} and will ping you when it's time to leave.`);
+        return;
+      }
+
+      const currentMin   = Math.round(result.seconds / 60);
+      const nowMs        = Date.now();
+      const latestDep    = arriveByDate
+        ? new Date(arriveByDate.getTime() - (currentMin + BUFFER_MIN) * 60_000)
+        : null;
+      const minUntilDep  = latestDep ? Math.round((latestDep.getTime() - nowMs) / 60_000) : null;
+
+      if (latestDep && minUntilDep <= 0) {
+        await bot.sendMessage(row.chat_id,
+          `⚠️ Leave right now — ${originShort} → ${destShort} is ${currentMin} min and you're cutting it close for ${deadlineStr}.`);
+        return;
+      }
+
+      // Traffic worse than predicted — warn and start continuous polling.
+      if (currentMin > row.threshold_min) {
+        commitWatch(row.chat_id, row.origin, row.destination, row.threshold_min,
+                    row.origin_place_id ?? null, row.dest_place_id ?? null);
+        const depStr = latestDep ? ` Leave by ${fmtTime(latestDep)} — ${minUntilDep} min from now.` : '';
+        await bot.sendMessage(row.chat_id,
+          `🔴 Traffic is heavier than expected — ${originShort} → ${destShort} is ${currentMin} min.${depStr} I'll ping you when it eases.`);
+        return;
+      }
+
+      // On track — give a live departure nudge.
+      const depStr = latestDep
+        ? `Leave by ${fmtTime(latestDep)} — ${minUntilDep} min from now.`
+        : `Leave when you're ready.`;
+      const deadlineCtx = deadlineStr ? ` You'll arrive before ${deadlineStr}.` : '';
+      await bot.sendMessage(row.chat_id,
+        `🟢 ${originShort} → ${destShort} is ${currentMin} min right now. ${depStr}${deadlineCtx}`);
+    } catch (err) {
+      logger.warn({ err, chatId: row.chat_id }, 'scheduled watch notify failed');
     }
   }, delayMs);
   pendingTimers.set(row.id, handle);
