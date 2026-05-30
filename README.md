@@ -16,6 +16,74 @@ Conversation history is persisted to SQLite. Retrieval is a hybrid: the 5 most r
 
 Places are canonicalised to Google place IDs at geocode time, so "Sarit Centre, Westlands" and "Sarit Centre, Westlands, Nairobi, Kenya" converge to the same key regardless of how the model phrased them. Traffic observations write to both a personal history (keyed by user) and an anonymised shared pool (keyed by place ID pair). New routes show community averages from day one instead of falling back to the static baseline.
 
+Departure advice uses a three-tier baseline to decide whether traffic is heavy: the user's own recorded travel times for that route and day/hour slot first, then the anonymised community pool keyed by place ID pair, then Google's static (no-traffic) duration as a last resort. The acceptable threshold is always computed as `ceil(baseline × 1.2)` — never hardcoded.
+
+When traffic is heavy, the departure advisor probes six future departure windows (15–120 minutes out) in parallel to find when conditions ease. Probe results are cached in SQLite for 10 minutes, keyed by place ID pair and offset. Concurrent users asking the same route during rush hour share one set of API results instead of each triggering six calls; only stale or absent offsets hit the network.
+
+Scheduled departure checks survive process restarts. When the bot promises to re-check traffic 15 minutes before your calculated departure time, it writes a `scheduled_watch` row to SQLite before setting any in-process timer. On startup the scheduler queries all outstanding rows and reconstructs the timers. A PM2 restart between promise and fire-time loses nothing.
+
+---
+
+## Architecture
+
+### Message routing
+
+Every free-text message takes one of two fast paths before any routing API is touched. The pending intent gate handles short confirmations ("ping me", "yes") without re-running NLP at all. `quickClassify` resolves the majority of routing messages with a single regex pass. Only genuinely ambiguous input reaches the model.
+
+```mermaid
+flowchart TD
+    A([User message]) --> B{Active pending intent?}
+    B -- Confirmation --> C([Resolve & reply])
+    B -- New query --> D{quickClassify regex}
+    D -- "~60% — unambiguous" --> E{Command}
+    D -- Uncertain --> F["Gemini 3.1 Flash-Lite\ntemp=0 · JSON schema · thinking disabled"]
+    F --> E
+    E --> G([check])
+    E --> H([depart])
+    E --> I([watch])
+    E --> J([setplace / scenic / matatu])
+    E --> K([unknown → clarify])
+```
+
+### Departure advisor — heavy traffic path
+
+The most complex code path. Shows how the three-tier baseline, probe cache, and auto-watch compose. The probe cache means the six parallel API calls happen at most once per 10 minutes per route, regardless of how many users ask concurrently.
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant Bot
+    participant DB as SQLite
+    participant Google as Google Routes API
+
+    User->>Bot: heading home
+    Bot->>DB: geocode cache → place IDs (no API call on hit)
+    Bot->>Google: getDurationSeconds (now)
+    Google-->>Bot: 51 min live · 32 min static
+
+    Note over Bot,DB: three-tier baseline: personal → pool → static
+    Bot->>DB: dbGetPersonalTypical / dbGetPoolTypical
+    DB-->>Bot: baseline 32 min → threshold ceil(32×1.2) = 39 min
+
+    Bot->>User: 🔴 Heavy — checking when it clears…
+
+    Note over Bot,Google: findClearTime — probe cache
+    Bot->>DB: dbGetProbeCache × 6 offsets
+    DB-->>Bot: some cached · remainder stale
+    Bot->>Google: parallel calls for uncached offsets only
+    Google-->>Bot: results
+    Bot->>DB: dbSetProbeCache (10 min TTL · shared across all users)
+
+    Bot->>DB: commitWatch threshold 39 min
+    Bot->>User: Leave in ~30 min. I'll ping when it drops under 39 min.
+
+    loop every 10 min
+        Bot->>Google: getDurationSeconds
+        Google-->>Bot: 37 min ≤ 39 min ✓
+        Bot->>User: 🟢 Leave now. Home is 37 min right now.
+    end
+```
+
 ---
 
 ## Usage

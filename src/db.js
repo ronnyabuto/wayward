@@ -160,6 +160,19 @@ export function initDb() {
     );
     CREATE INDEX IF NOT EXISTS idx_pending_user ON pending_intents (user_id, expires_at);
     CREATE INDEX IF NOT EXISTS idx_pending_fire ON pending_intents (fire_at) WHERE fire_at IS NOT NULL;
+
+    -- Short-lived cache for findClearTime departure probes.
+    -- Keyed by (origin, dest, offset_min); TTL enforced at read time.
+    -- Shared across all users: traffic at a given future time is identical for everyone
+    -- asking the same route, so one probe result serves many concurrent users.
+    CREATE TABLE IF NOT EXISTS route_probes (
+      origin_place_id  TEXT    NOT NULL,
+      dest_place_id    TEXT    NOT NULL,
+      offset_min       INTEGER NOT NULL,
+      duration_sec     INTEGER NOT NULL,
+      recorded_at      INTEGER NOT NULL,
+      PRIMARY KEY (origin_place_id, dest_place_id, offset_min)
+    );
   `);
 
   // Migrate traffic_pool: if it was created without the id column (old composite PK),
@@ -285,6 +298,32 @@ export function dbGetPoolTypical(originPlaceId, destPlaceId, dayOfWeek, hourOfDa
   `).get(originPlaceId, destPlaceId, dayOfWeek, hourOfDay, thirtyDaysAgo);
   if (!row || row.count < 3) return null;
   return { avgMin: Math.round(row.avg_min), count: row.count };
+}
+
+// ── Route probe cache ─────────────────────────────────────────────────────────
+
+const PROBE_TTL_S = 10 * 60; // 10 min — aligns with the scheduler poll cycle
+
+// Returns cached duration_sec for this route+offset, or null if absent/stale.
+export function dbGetProbeCache(originPlaceId, destPlaceId, offsetMin) {
+  const minRecordedAt = Math.floor(Date.now() / 1000) - PROBE_TTL_S;
+  const row = db.prepare(`
+    SELECT duration_sec FROM route_probes
+    WHERE origin_place_id = ? AND dest_place_id = ? AND offset_min = ? AND recorded_at > ?
+  `).get(originPlaceId, destPlaceId, offsetMin, minRecordedAt);
+  return row ? row.duration_sec : null;
+}
+
+// Upserts a probe result. Composite PK means a later probe for the same offset
+// replaces the earlier one — always the freshest reading wins.
+export function dbSetProbeCache(originPlaceId, destPlaceId, offsetMin, durationSec) {
+  db.prepare(`
+    INSERT INTO route_probes (origin_place_id, dest_place_id, offset_min, duration_sec, recorded_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(origin_place_id, dest_place_id, offset_min) DO UPDATE SET
+      duration_sec = excluded.duration_sec,
+      recorded_at  = excluded.recorded_at
+  `).run(originPlaceId, destPlaceId, offsetMin, durationSec, Math.floor(Date.now() / 1000));
 }
 
 // ── Watches ──────────────────────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 import { getDurationSeconds } from '../services/traffic.js';
 import { geocode, GeocodeNotFoundError } from '../utils/geocode.js';
 import { commitWatch } from './watch.js';
-import { dbLogTraffic, dbGetPersonalTypical, dbLogTrafficPool, dbGetPoolTypical, dbInsertPendingIntent } from '../db.js';
+import { dbLogTraffic, dbGetPersonalTypical, dbLogTrafficPool, dbGetPoolTypical, dbInsertPendingIntent, dbGetProbeCache, dbSetProbeCache } from '../db.js';
 import { scheduleTimedWatch } from '../scheduler.js';
 import { getNairobiComponents } from '../utils/time.js';
 import { logger } from '../utils/logger.js';
@@ -135,25 +135,54 @@ export async function handleDepart(bot, chatId, originStr, destinationStr, arriv
   commitWatch(chatId, originStr, destinationStr, threshold, origin.placeId, destination.placeId);
 }
 
-// Query the route at 15, 30, 45, 60, 90, 120 min intervals in parallel.
+// Query the route at 15, 30, 45, 60, 90, 120 min intervals.
+// Results are cached in SQLite for 10 min, keyed by place ID pair + offset, so
+// concurrent users asking the same route share one set of probe results instead
+// of each triggering 6 API calls. Only uncached offsets hit the network.
 // Returns the earliest offset (in minutes) where the drive falls under targetMin,
 // or null if traffic stays heavy throughout the 2-hour window.
 async function findClearTime(origin, destination, targetMin) {
   const offsets = [15, 30, 45, 60, 90, 120];
+  const canCache = !!(origin.placeId && destination.placeId);
 
-  const results = await Promise.allSettled(
-    offsets.map(async (offset) => {
-      const depTime = new Date(Date.now() + offset * 60_000);
-      const result = await getDurationSeconds(origin, destination, depTime);
-      return { offset, minutes: result ? Math.round(result.seconds / 60) : Infinity };
-    })
-  );
+  // Resolve as many offsets as possible from cache before touching the API.
+  const minutes = {};
+  const toFetch = [];
+
+  if (canCache) {
+    for (const offset of offsets) {
+      const cached = dbGetProbeCache(origin.placeId, destination.placeId, offset);
+      if (cached !== null) {
+        minutes[offset] = Math.round(cached / 60);
+      } else {
+        toFetch.push(offset);
+      }
+    }
+  } else {
+    toFetch.push(...offsets);
+  }
+
+  // Fire live calls only for offsets not covered by cache.
+  if (toFetch.length > 0) {
+    const results = await Promise.allSettled(
+      toFetch.map(async (offset) => {
+        const depTime = new Date(Date.now() + offset * 60_000);
+        const result = await getDurationSeconds(origin, destination, depTime);
+        const seconds = result?.seconds ?? null;
+        if (canCache && seconds !== null) {
+          dbSetProbeCache(origin.placeId, destination.placeId, offset, seconds);
+        }
+        return { offset, minutes: seconds !== null ? Math.round(seconds / 60) : Infinity };
+      })
+    );
+
+    for (const r of results) {
+      if (r.status === 'fulfilled') minutes[r.value.offset] = r.value.minutes;
+    }
+  }
 
   for (const offset of offsets) {
-    const match = results.find(
-      (r) => r.status === 'fulfilled' && r.value.offset === offset
-    );
-    if (match && match.value.minutes <= targetMin) return offset;
+    if ((minutes[offset] ?? Infinity) <= targetMin) return offset;
   }
   return null;
 }
