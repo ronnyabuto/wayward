@@ -243,8 +243,9 @@ function fetchOnce(key, body) {
 
 // savedPlaces:         { home: 'Seresponda Court, Nairobi', work: 'Westlands, Nairobi' }
 // conversationHistory: [{ userMessage, modelResponse }, ...] — last N turns, oldest first
+// activeFacts:         [{ subject, predicate, object }, ...] — long-term user facts from user_facts table
 // Returns { command, origin, destination, threshold, place_name, place_address, clarification }
-export async function parseIntent(userMessage, savedPlaces = {}, conversationHistory = []) {
+export async function parseIntent(userMessage, savedPlaces = {}, conversationHistory = [], activeFacts = []) {
   const now = new Date().toLocaleTimeString('en-KE', {
     hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Africa/Nairobi',
   });
@@ -255,6 +256,10 @@ export async function parseIntent(userMessage, savedPlaces = {}, conversationHis
   const placesContext = placesLines
     ? `User's saved locations:\n${placesLines}`
     : `User has no saved locations yet.`;
+
+  const factsContext = activeFacts.length > 0
+    ? `Known facts about this user:\n${activeFacts.map(f => `  ${f.subject} ${f.predicate} ${f.object}`).join('\n')}`
+    : '';
 
   // If the most recent turn had a known route, surface it explicitly in the user content
   // so the model doesn't have to parse JSON from its own prior turns (unreliable at thinkingBudget:0).
@@ -277,7 +282,8 @@ export async function parseIntent(userMessage, savedPlaces = {}, conversationHis
     ? `\nMost recent route from context: origin="${lastRoute.origin ?? 'unknown'}", destination="${lastRoute.destination ?? 'unknown'}".`
     : '';
 
-  const userContent = `${placesContext}\nCurrent local time: ${now}${routeCtx}\n\n${userMessage}`;
+  const userContent = [placesContext, factsContext, `Current local time: ${now}${routeCtx}`, userMessage]
+    .filter(Boolean).join('\n\n');
 
   // Build multi-turn contents: prior turns first, then the current message.
   // Model turns store the raw JSON string so Gemini can resolve forward references.

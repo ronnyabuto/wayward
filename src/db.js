@@ -58,6 +58,8 @@ export function initDb() {
       user_id     INTEGER NOT NULL,
       user_msg    TEXT    NOT NULL,
       bot_intent  TEXT    NOT NULL,
+      wing        TEXT    NOT NULL DEFAULT 'routing',
+      room        TEXT    NOT NULL DEFAULT 'general',
       created_at  INTEGER NOT NULL
     );
 
@@ -238,6 +240,13 @@ export function initDb() {
   if (!watchCols.has('origin_place_id')) db.exec(`ALTER TABLE watches ADD COLUMN origin_place_id TEXT`);
   if (!watchCols.has('dest_place_id'))   db.exec(`ALTER TABLE watches ADD COLUMN dest_place_id TEXT`);
 
+  // Migrate memory_turns: add wing/room columns for MemPalace hierarchical retrieval.
+  const memTurnCols = new Set(
+    db.prepare(`SELECT name FROM pragma_table_info('memory_turns')`).all().map(r => r.name)
+  );
+  if (!memTurnCols.has('wing')) db.exec(`ALTER TABLE memory_turns ADD COLUMN wing TEXT NOT NULL DEFAULT 'routing'`);
+  if (!memTurnCols.has('room')) db.exec(`ALTER TABLE memory_turns ADD COLUMN room TEXT NOT NULL DEFAULT 'general'`);
+
   logger.info('Database initialised.');
 }
 
@@ -416,18 +425,20 @@ export function dbLogTraffic(chatId, origin, destination, durationSec, staticSec
 
 // ── Memory turns ──────────────────────────────────────────────────────────────
 
-const MAX_TURNS_STORED     = 50;
-const MAX_TURNS_CONTEXT    = 5;
-const MAX_FTS_HITS         = 8;
-const RECENCY_HALF_LIFE_SEC = 7 * 24 * 60 * 60; // 7-day half-life for temporal decay
+const MAX_TURNS_STORED      = 50;
+const MAX_L1_RECENCY        = 3;   // L1: always-loaded recent turns (guaranteed context)
+const MAX_L2_FTS_HITS       = 8;   // L2: wing-filtered FTS candidates
+const MAX_TURNS_CONTEXT     = 5;   // total turns returned to Gemini (L1 + L2 together)
+const RECENCY_HALF_LIFE_SEC = 7 * 24 * 60 * 60;
 
 // Persist a completed exchange. Prunes the oldest turns beyond MAX_TURNS_STORED.
-export function dbPersistTurn(userId, chatId, userMsg, intentJson) {
+// wing/room are derived from Gemini's own classification — never from language heuristics.
+export function dbPersistTurn(userId, chatId, userMsg, intentJson, wing = 'routing', room = 'general') {
   const now = Math.floor(Date.now() / 1000);
   db.prepare(`
-    INSERT INTO memory_turns (chat_id, user_id, user_msg, bot_intent, created_at)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(chatId, userId, userMsg, intentJson, now);
+    INSERT INTO memory_turns (chat_id, user_id, user_msg, bot_intent, wing, room, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(chatId, userId, userMsg, intentJson, wing, room, now);
 
   db.prepare(`
     DELETE FROM memory_turns
@@ -438,30 +449,50 @@ export function dbPersistTurn(userId, chatId, userMsg, intentJson) {
   `).run(userId, userId, MAX_TURNS_STORED);
 }
 
-// Hybrid retrieval: most recent turns + FTS5 keyword matches from older stored turns,
-// merged by temporal decay score and returned oldest-first for the Gemini context.
+// Hybrid retrieval: most recent turns (L1, always) + FTS5 keyword matches from older
+// stored turns (L2, wing-filtered). The L2 wing is derived from the most recent stored
+// turn's classification — what Gemini last labelled this user's conversation as.
+// This is the MemPalace pattern: navigate to the right room before searching, where
+// "room" is determined by prior classification, not by language heuristics on the
+// current message. Falls back to full cross-wing search when context is ambiguous.
 // After a bot restart the volatile window is gone — this restores it from SQLite.
 export function dbRetrieveRelevantTurns(userId, queryText) {
   const now = Math.floor(Date.now() / 1000);
 
+  // L1: always-loaded recent turns. Capped at MAX_L1_RECENCY (not MAX_TURNS_CONTEXT) so
+  // there are remaining slots for L2 FTS results to actually reach Gemini's context.
   const recentTurns = db.prepare(`
-    SELECT id, user_msg, bot_intent, created_at FROM memory_turns
-    WHERE user_id = ? ORDER BY created_at DESC LIMIT ?
-  `).all(userId, MAX_TURNS_CONTEXT);
+    SELECT id, user_msg, bot_intent, created_at, wing FROM memory_turns
+    WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT ?
+  `).all(userId, MAX_L1_RECENCY);
 
   const recentIds = new Set(recentTurns.map(t => t.id));
+
+  // L2 wing: derived from the most recent stored classification.
+  // Skip the filter for 'general' (unknown/off-topic turns) so a single ambiguous
+  // message doesn't block retrieval of all prior meaningful context.
+  const latestWing = recentTurns[0]?.wing;
+  const l2Wing = (latestWing && latestWing !== 'general') ? latestWing : null;
 
   let ftsTurns = [];
   try {
     const sanitized = queryText.replace(/[^\p{L}\p{N} ]/gu, ' ').trim();
     if (sanitized.length > 0) {
-      ftsTurns = db.prepare(`
-        SELECT m.id, m.user_msg, m.bot_intent, m.created_at, -rank AS fts_score
-        FROM memory_turns_fts
-        JOIN memory_turns m ON m.id = memory_turns_fts.rowid
-        WHERE memory_turns_fts MATCH ? AND m.user_id = ?
-        ORDER BY rank LIMIT ?
-      `).all(sanitized, userId, MAX_FTS_HITS);
+      ftsTurns = l2Wing
+        ? db.prepare(`
+            SELECT m.id, m.user_msg, m.bot_intent, m.created_at, -rank AS fts_score
+            FROM memory_turns_fts
+            JOIN memory_turns m ON m.id = memory_turns_fts.rowid
+            WHERE memory_turns_fts MATCH ? AND m.user_id = ? AND m.wing = ?
+            ORDER BY rank LIMIT ?
+          `).all(sanitized, userId, l2Wing, MAX_L2_FTS_HITS)
+        : db.prepare(`
+            SELECT m.id, m.user_msg, m.bot_intent, m.created_at, -rank AS fts_score
+            FROM memory_turns_fts
+            JOIN memory_turns m ON m.id = memory_turns_fts.rowid
+            WHERE memory_turns_fts MATCH ? AND m.user_id = ?
+            ORDER BY rank LIMIT ?
+          `).all(sanitized, userId, MAX_L2_FTS_HITS);
     }
   } catch {
     // Malformed FTS query — fall back to recency-only.

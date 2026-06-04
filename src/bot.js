@@ -10,7 +10,7 @@ import { handleSetPlace, registerSetPlace, registerListPlaces, geocodePlace } fr
 import { startScheduler, loadWatchesFromDb, loadScheduledPendingIntents } from './scheduler.js';
 import { parseIntent, quickClassify } from './utils/nlp.js';
 import { initDb, dbGetSavedPlaces, dbSetPlace, dbPersistTurn, dbRetrieveRelevantTurns,
-         dbGetActivePendingIntent, dbDeletePendingIntent } from './db.js';
+         dbGetActivePendingIntent, dbDeletePendingIntent, dbGetActiveFacts } from './db.js';
 
 const { TELEGRAM_BOT_TOKEN } = process.env;
 
@@ -37,6 +37,16 @@ registerSetPlace(bot);
 registerListPlaces(bot);
 startScheduler(bot);
 loadScheduledPendingIntents(bot);
+
+// Maps Gemini's command classification to a memory wing and room.
+// Wing/room are derived from what Gemini classified — never from language heuristics —
+// so the taxonomy adapts to whatever the model returns, not to hardcoded keywords.
+function intentToWing(command) {
+  if (command === 'setplace') return { wing: 'identity', room: 'places' };
+  if (command === 'matatu')   return { wing: 'transit',  room: 'matatu' };
+  if (['check', 'depart', 'watch', 'scenic'].includes(command)) return { wing: 'routing', room: command };
+  return { wing: 'general', room: 'general' };
+}
 
 // Pending setplace confirmations keyed by userId.
 // Volatile — cleared on restart; the user just resends if that happens.
@@ -93,7 +103,7 @@ bot.on('message', async (msg) => {
           .toLocaleTimeString('en-KE', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Africa/Nairobi' })
           .replace(/^00:/, '12:');
         await bot.sendMessage(chatId, `Already on it — I'll start watching at ${timeStr} and ping you when it's time to leave.`);
-        dbPersistTurn(userId, chatId, text, JSON.stringify({ command: 'watch', origin: pendingIntent.origin, destination: pendingIntent.destination, threshold: pendingIntent.threshold_min }));
+        dbPersistTurn(userId, chatId, text, JSON.stringify({ command: 'watch', origin: pendingIntent.origin, destination: pendingIntent.destination, threshold: pendingIntent.threshold_min }), 'routing', 'watch');
         return;
       }
 
@@ -104,7 +114,7 @@ bot.on('message', async (msg) => {
           const oShort = pendingIntent.origin.split(',')[0];
           const dShort = pendingIntent.destination.split(',')[0];
           await bot.sendMessage(chatId, `Watch set. I'll message you when ${oShort} → ${dShort} drops under ${pendingIntent.threshold_min} min.`);
-          dbPersistTurn(userId, chatId, text, JSON.stringify({ command: 'watch', origin: pendingIntent.origin, destination: pendingIntent.destination, threshold: pendingIntent.threshold_min }));
+          dbPersistTurn(userId, chatId, text, JSON.stringify({ command: 'watch', origin: pendingIntent.origin, destination: pendingIntent.destination, threshold: pendingIntent.threshold_min }), 'routing', 'watch');
           return;
         }
         // User moved on to something else — clear the stale offer before continuing.
@@ -118,14 +128,16 @@ bot.on('message', async (msg) => {
 
     if (quick && quick.command === 'check' && quick.origin && quick.destination) {
       await handleCheck(bot, chatId, quick.origin, quick.destination, userId);
-      dbPersistTurn(userId, chatId, text, JSON.stringify(quick));
+      const { wing, room } = intentToWing(quick.command);
+      dbPersistTurn(userId, chatId, text, JSON.stringify(quick), wing, room);
       return;
     }
 
     if (quick && quick.command === 'matatu') {
       if (quick.origin && quick.destination) {
         await handleMatatu(bot, chatId, quick.origin, quick.destination);
-        dbPersistTurn(userId, chatId, text, JSON.stringify(quick));
+        const { wing, room } = intentToWing(quick.command);
+        dbPersistTurn(userId, chatId, text, JSON.stringify(quick), wing, room);
         return;
       }
       // Has route_number but no corridor — fall through to Gemini to extract location context.
@@ -134,18 +146,20 @@ bot.on('message', async (msg) => {
     // Layer 2: Gemini — handles saved-place resolution, context carry-forward,
     // arrive_by extraction, and any pattern the regex doesn't catch.
     const savedPlaces = dbGetSavedPlaces(userId);
+    const activeFacts = dbGetActiveFacts(userId);
     const history     = dbRetrieveRelevantTurns(userId, text);
 
     let intent;
     try {
-      intent = await parseIntent(text, savedPlaces, history);
+      intent = await parseIntent(text, savedPlaces, history, activeFacts);
     } catch (err) {
       logger.error({ err, chatId }, 'Gemini intent parse error');
       await bot.sendMessage(chatId, 'Something went wrong understanding that. Try again in a moment.');
       return;
     }
 
-    dbPersistTurn(userId, chatId, text, JSON.stringify(intent));
+    const { wing, room } = intentToWing(intent.command);
+    dbPersistTurn(userId, chatId, text, JSON.stringify(intent), wing, room);
 
     if (intent.command === 'unknown') {
       await bot.sendMessage(
