@@ -2,70 +2,84 @@ import { logger } from './logger.js';
 
 // Regex pre-filter: classifies unambiguous messages before touching Gemini.
 // Returns { command, origin, destination, route_number } or null when uncertain.
-// Handles the ~60% of messages that follow simple "X to Y" patterns.
+//
+// Deliberately narrow (2026-09 rewrite): only a bare route number and a
+// strict, unprefixed "<origin> to <destination>" shape are handled here. This
+// used to also strip various leading words ("how long from", "matatu from",
+// "distance from") and reject an ever-growing list of phrasings that broke it
+// — seven single-incident regex guards accreted over months, each patched
+// after one specific bug report, and still missed cases as basic as "traffic
+// from X to Y" bleeding "traffic" into the origin. Anything that needs a
+// prefix parsed off, or contains a digit, or opens with a question/pronoun/
+// domain word defers to Gemini instead — see the comments on each guard below
+// for why each one is a closed category rather than an incident list.
+//
 // Saved-place aliases ("home", "work") are intentionally NOT resolved here —
 // those go through Gemini which has the saved-places context.
 export function quickClassify(text) {
   const t = text.trim();
 
-  // Defer to Gemini for any message that implies a departure deadline.
-  // These need arrive_by extraction (AM/PM disambiguation, relative times,
-  // Swahili/Sheng) which only Gemini's schema handles. Never classify locally.
+  // Defer to Gemini for any explicit departure-timing question — these need
+  // arrive_by extraction (AM/PM disambiguation, relative times, Swahili/Sheng)
+  // which only Gemini's schema handles. Never classify locally.
   const DEPART_QUESTION = /\b(?:when\s+should\s+i|what\s+time\s+should\s+i|when\s+do\s+i\s+(?:need\s+to|have\s+to)|niende\s+lini)\b/i;
   if (DEPART_QUESTION.test(t)) return null;
 
-  // Bare digits (e.g. "before 8") and 24 h formats (e.g. "by 08:00") covered by
-  // making the am/pm suffix optional. Negative lookahead prevents false positives
-  // on unit phrases like "by 4 seater" or "by 2 km".
-  const DEADLINE_SIGNAL = /\b(?:by|before)\s+(?:\d{1,2}(?:[.:]\d{2})?(?:\s*(?:am|pm))?|noon|midnight)\b(?!\s*(?:seater|seaters|people|passengers|km|kg|cc|miles|meters|lane|lanes))/i;
-  if (DEADLINE_SIGNAL.test(t)) return null;
-
-  // "arriving at 6pm", "arrive by 8am" — deadline framed from the arrival side
-  // rather than the departure side. Without this guard "at 6pm" bleeds into the
-  // destination string and corrupts geocoding.
-  const ARRIVAL_AT = /\barri(?:ve|val|ving)\s+(?:at|by)\s+\d{1,2}(?:[.:]\d{2})?\s*(?:am|pm)?\b/i;
-  if (ARRIVAL_AT.test(t)) return null;
-
-  // "matatu / mat [from] X to Y"  or  "Route 23 matatu"  or  "no. 23"
+  // "matatu / mat [from] X to Y"  or  "Route 23 matatu"  or  "no. 23" — closed,
+  // digit-anchored grammar. This is the only case here that has never needed a
+  // fix and never will; it's the one part of this function safe to keep
+  // hand-matching indefinitely.
   const matatuRoute = t.match(/\b(?:route\s*|no\.?\s*)(\d+)\b/i);
   if (matatuRoute) {
     return { command: 'matatu', origin: null, destination: null, route_number: matatuRoute[1] };
   }
 
-  const isMatatuQuery = /\bmat(?:atu)?\b/i.test(t);
-  const isCheckQuery  = /\b(?:traffic|how.?long|how.?far|how.?is|drive|commute)\b/i.test(t);
+  // Strict "<origin> to <destination>" match — no leading words are stripped.
+  // If the message needs anything parsed off before the origin ("how's traffic
+  // from X to Y", "matatu from X to Y", "distance from X to Y"), that's exactly
+  // the open-ended free-text parsing this fast path should not attempt; defer
+  // to Gemini rather than enumerate every possible prefix.
+  //
+  // Origin/destination exclude digits by construction. That structurally rules
+  // out numeric deadlines ("by 8am", "before 8", "9am meeting") bleeding into
+  // either slot — no keyword list per time format needed, because a matched
+  // place name literally cannot contain the digit a deadline requires.
+  const PLACE = `[a-zA-Z][a-zA-Z' -]{1,40}?`;
+  const routeMatch = t.match(new RegExp(
+    `^(${PLACE})\\s+to\\s+(${PLACE})(?:\\s+(traffic|matatu|mat|now|right\\s*now|driving))?\\??$`, 'i'
+  ));
+  if (!routeMatch) return null;
 
-  // "X to Y [traffic|matatu|driving|now]" — extract origin and destination.
-  // Strips leading "matatu/mat/from/how long from" so they don't bleed into origin.
-  const routeMatch = t.match(
-    /^(?:how.+?from\s+|mat(?:atu)?\s+|from\s+)?(.+?)\s+to\s+(.+?)(?:\s+(?:traffic|matatu|mat|now|right\s*now|driving|via.*)?)?$/i
-  );
-  if (routeMatch) {
-    const [, rawOrigin, rawDest] = routeMatch;
-    const origin      = rawOrigin.trim();
-    const destination = rawDest.trim().replace(/[?!.,]+$/, '');
+  const origin      = routeMatch[1].trim();
+  const destination = routeMatch[2].trim();
+  const qualifier   = routeMatch[3];
 
-    // Reject vague pronouns, saved-place aliases, or fragments too short to geocode.
-    const VAGUE     = /\b(here|there|get\s+there|from\s+here|from\s+there|it|that)\b/i;
-    const ALIAS     = /^(home|work|office|school|me|us)$/i;
-    if (origin.length < 2 || destination.length < 2) return null;
-    if (VAGUE.test(origin) || VAGUE.test(destination))  return null;
-    if (ALIAS.test(origin) || ALIAS.test(destination))  return null;
-    // Reject sentence fragments that split on the first "to" but aren't place names.
-    // "I want to go to X" → origin="I want" or "Want"; "Going to X from Y" → origin="Going".
-    if (/^(?:i\b|you\b|we\b|they\b|want\b|need\b|going\b|trying\b|planning\b|heading\b|looking\b|check\b)/i.test(origin)) return null;
-    // Reject if destination is a sentence ending in a question or exclamation.
-    if (/[?!]/.test(destination)) return null;
+  // Vague pronouns and saved-place aliases need Gemini's saved-places context,
+  // which this function doesn't have.
+  const VAGUE = /\b(here|there|get\s+there|from\s+here|from\s+there|it|that)\b/i;
+  const ALIAS = /^(home|work|office|school|me|us)$/i;
+  if (VAGUE.test(origin) || VAGUE.test(destination)) return null;
+  if (ALIAS.test(origin) || ALIAS.test(destination)) return null;
 
-    if (isMatatuQuery) {
-      return { command: 'matatu', origin, destination, route_number: null };
-    }
-    if (isCheckQuery || /\bto\b/.test(t)) {
-      return { command: 'check', origin, destination, route_number: null };
-    }
-  }
+  // A real place name is never a question — English has exactly these WH-words.
+  if (/^(?:how|what|when|where|why|who|which)\b/i.test(origin)) return null;
 
-  return null;
+  // A real place name is never one of the bot's own query-type nouns. Bounded
+  // by the bot's fixed 6-command vocabulary, not by incident history — this
+  // list only grows if the bot itself grows a new command.
+  if (/^(?:traffic|distance|directions?|route|drive|driving|commute|matatu|mat)\b/i.test(origin)) return null;
+
+  // A real place name never opens with a pronoun or auxiliary/modal verb — a
+  // closed grammatical category, not a per-bug-report list. Catches sentence
+  // fragments like "I want to go to X" or "Am going to X".
+  if (/^(?:i|you|we|they|am|is|are|was|were|be|been|do|does|did|will|would|can|could|should|shall|must|may|might|have|has|had|want|need|going|trying|planning|heading|looking|leaving|check)\b/i.test(origin)) return null;
+
+  return {
+    command: qualifier && /^mat/i.test(qualifier) ? 'matatu' : 'check',
+    origin,
+    destination,
+    route_number: null,
+  };
 }
 
 // Gemini 3.1 Flash-Lite — natural language → structured intent.

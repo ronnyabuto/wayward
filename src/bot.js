@@ -140,7 +140,19 @@ bot.on('message', async (msg) => {
         dbPersistTurn(userId, chatId, text, JSON.stringify(quick), wing, room);
         return;
       }
-      // Has route_number but no corridor — fall through to Gemini to extract location context.
+      // Bare route number, no corridor — quickClassify can't invent one and
+      // neither can Gemini, so ask directly instead of spending a call to get
+      // the same clarification (mirrors the identical check on the Gemini
+      // path below for the case where Gemini also can't resolve a corridor).
+      if (quick.route_number) {
+        await bot.sendMessage(
+          chatId,
+          `I don't have route data for Route ${quick.route_number} yet. Which corridor does it run? (e.g. "Route ${quick.route_number} CBD to Westlands")`
+        );
+        const { wing, room } = intentToWing(quick.command);
+        dbPersistTurn(userId, chatId, text, JSON.stringify(quick), wing, room);
+        return;
+      }
     }
 
     // Layer 2: Gemini — handles saved-place resolution, context carry-forward,
