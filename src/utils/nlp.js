@@ -111,10 +111,12 @@ const GEMINI_KEYS = [
   process.env.GEMINI_API_KEY_4,
 ].filter(Boolean);
 
-if (GEMINI_KEYS.length === 0) {
-  throw new Error('No Gemini API keys configured. Set GEMINI_API_KEY in .env.');
-}
-
+// Deliberately not validated here: quickClassify is a pure regex function with
+// no Gemini dependency, and this module used to throw on import if no key was
+// configured — which meant a test importing only quickClassify (or a CI runner
+// with no .env at all) crashed before running a single assertion. bot.js
+// checks GEMINI_API_KEY at startup for the real fail-fast property; the check
+// below covers parseIntent itself for any other caller.
 let keyIndex = 0;
 
 // Constrained-decoding schema: Gemini's FSM enforces this at token-generation time,
@@ -328,6 +330,9 @@ export async function parseIntent(userMessage, savedPlaces = {}, conversationHis
     },
   };
 
+  if (GEMINI_KEYS.length === 0) {
+    throw new Error('No Gemini API keys configured. Set GEMINI_API_KEY in .env.');
+  }
   // Key rotation: if keyIndex has already advanced past all keys (all exhausted), fail fast.
   if (keyIndex >= GEMINI_KEYS.length) {
     throw new Error('All Gemini API keys have exhausted their daily quota. Restart the bot after midnight Pacific Time to reset.');

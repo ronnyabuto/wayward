@@ -13,11 +13,15 @@ import { parseIntent, quickClassify } from './utils/nlp.js';
 import { initDb, dbGetSavedPlaces, dbSetPlace, dbPersistTurn, dbRetrieveRelevantTurns,
          dbGetActivePendingIntent, dbDeletePendingIntent, dbGetActiveFacts } from './db.js';
 
-const { TELEGRAM_BOT_TOKEN } = process.env;
-
+const { TELEGRAM_BOT_TOKEN, GEMINI_API_KEY } = process.env;
 
 if (!TELEGRAM_BOT_TOKEN) {
   logger.fatal('Missing TELEGRAM_BOT_TOKEN. Copy .env.example → .env and fill it in.');
+  process.exit(1);
+}
+
+if (!GEMINI_API_KEY) {
+  logger.fatal('Missing GEMINI_API_KEY. Copy .env.example → .env and fill it in.');
   process.exit(1);
 }
 
