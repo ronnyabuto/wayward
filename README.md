@@ -10,9 +10,9 @@ Works in private chats and Telegram groups. Type in plain text.
 
 Nairobi has no conversational traffic tool that works in plain text, Swahili, and Sheng. Everything else requires opening an app and already knowing your route.
 
-NLP runs two layers. A regex pre-filter handles unambiguous "X to Y" patterns — around 60% of real messages — without a Gemini call. Ambiguous phrasing, saved-place aliases, arrival deadlines, and conversation carry-forward go to the model. Flash-lite over flash was a quota call: 4× more daily free requests, a third of the cost, negligible quality difference for temperature-0 schema-constrained classification.
+NLP runs two layers. A regex pre-filter handles bare route numbers and strict, unprefixed "X to Y" phrasing without a Gemini call — deliberately narrow, since anything needing a prefix parsed off, containing a digit, or opening with a question word is exactly the kind of open-ended phrasing hand-written patterns can't keep up with, so it defers to the model instead. Ambiguous phrasing, saved-place aliases, arrival deadlines, and conversation carry-forward go to the model. Flash-lite over flash was a quota call: 4× more daily free requests, a third of the cost, negligible quality difference for temperature-0 schema-constrained classification.
 
-Conversation history is persisted to SQLite. Retrieval is a hybrid: the 5 most recent turns always included, older turns surfaced by FTS5 keyword match scored by temporal decay. "What about from Westlands instead?" works across restarts. The FTS index stays in sync via SQLite triggers, not application code.
+Conversation history is persisted to SQLite, tagged at write time with a wing/room derived from Gemini's own command classification (never from language heuristics). Retrieval is a hybrid: the 3 most recent turns always included (L1) regardless of topic, older turns surfaced by FTS5 keyword match pre-filtered to the current wing and scored by temporal decay (L2) — so a routing question pulls routing history, not an unrelated saved-place conversation from last week. "What about from Westlands instead?" works across restarts. The FTS index stays in sync via SQLite triggers, not application code.
 
 Places are canonicalised to Google place IDs at geocode time, so "Sarit Centre, Westlands" and "Sarit Centre, Westlands, Nairobi, Kenya" converge to the same key regardless of how the model phrased them. Traffic observations write to both a personal history (keyed by user) and an anonymised shared pool (keyed by place ID pair). New routes show community averages from day one instead of falling back to the static baseline.
 
@@ -28,15 +28,15 @@ Scheduled departure checks survive process restarts. When the bot promises to re
 
 ### Message routing
 
-Every free-text message takes one of two fast paths before any routing API is touched. The pending intent gate handles short confirmations ("ping me", "yes") without re-running NLP at all. `quickClassify` resolves the majority of routing messages with a single regex pass. Only genuinely ambiguous input reaches the model.
+Every free-text message takes one of two fast paths before any routing API is touched. The pending intent gate handles short confirmations ("ping me", "yes") without re-running NLP at all. `quickClassify` resolves a deliberately narrow set of unambiguous patterns — bare route numbers, strict unprefixed "X to Y" — with a single regex pass. Everything else, including anything that needs a prefix parsed off, reaches the model.
 
 ```mermaid
 flowchart TD
     A([User message]) --> B{Active pending intent?}
     B -- Confirmation --> C([Resolve & reply])
     B -- New query --> D{quickClassify regex}
-    D -- "~60% — unambiguous" --> E{Command}
-    D -- Uncertain --> F["Gemini 3.1 Flash-Lite\ntemp=0 · JSON schema · thinking disabled"]
+    D -- "route number / bare X to Y" --> E{Command}
+    D -- Anything else --> F["Gemini 3.1 Flash-Lite\ntemp=0 · JSON schema · thinking disabled"]
     F --> E
     E --> G([check])
     E --> H([depart])
