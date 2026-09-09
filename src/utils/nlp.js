@@ -8,6 +8,24 @@ import { logger } from './logger.js';
 export function quickClassify(text) {
   const t = text.trim();
 
+  // Defer to Gemini for any message that implies a departure deadline.
+  // These need arrive_by extraction (AM/PM disambiguation, relative times,
+  // Swahili/Sheng) which only Gemini's schema handles. Never classify locally.
+  const DEPART_QUESTION = /\b(?:when\s+should\s+i|what\s+time\s+should\s+i|when\s+do\s+i\s+(?:need\s+to|have\s+to)|niende\s+lini)\b/i;
+  if (DEPART_QUESTION.test(t)) return null;
+
+  // Bare digits (e.g. "before 8") and 24 h formats (e.g. "by 08:00") covered by
+  // making the am/pm suffix optional. Negative lookahead prevents false positives
+  // on unit phrases like "by 4 seater" or "by 2 km".
+  const DEADLINE_SIGNAL = /\b(?:by|before)\s+(?:\d{1,2}(?:[.:]\d{2})?(?:\s*(?:am|pm))?|noon|midnight)\b(?!\s*(?:seater|seaters|people|passengers|km|kg|cc|miles|meters|lane|lanes))/i;
+  if (DEADLINE_SIGNAL.test(t)) return null;
+
+  // "arriving at 6pm", "arrive by 8am" — deadline framed from the arrival side
+  // rather than the departure side. Without this guard "at 6pm" bleeds into the
+  // destination string and corrupts geocoding.
+  const ARRIVAL_AT = /\barri(?:ve|val|ving)\s+(?:at|by)\s+\d{1,2}(?:[.:]\d{2})?\s*(?:am|pm)?\b/i;
+  if (ARRIVAL_AT.test(t)) return null;
+
   // "matatu / mat [from] X to Y"  or  "Route 23 matatu"  or  "no. 23"
   const matatuRoute = t.match(/\b(?:route\s*|no\.?\s*)(\d+)\b/i);
   if (matatuRoute) {
