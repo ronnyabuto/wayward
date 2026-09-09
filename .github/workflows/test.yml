@@ -1,0 +1,23 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  quickclassify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      # Free-tier, zero-quota-cost regression suite (test/quickClassify.test.js).
+      # Deliberately does NOT run test:golden — that suite calls the real Gemini
+      # API and costs the project's daily quota, so it stays a manual step you
+      # run yourself whenever SYSTEM_PROMPT or RESPONSE_SCHEMA changes:
+      #   RUN_GOLDEN_TESTS=1 npm run test:golden
+      - run: npm test
