@@ -1,6 +1,7 @@
 import { geocode, GeocodeNotFoundError } from '../utils/geocode.js';
 import { dbSetPlace, dbGetSavedPlaces } from '../db.js';
 import { logger } from '../utils/logger.js';
+import { resolveUserId } from '../utils/telegram.js';
 
 // Geocodes addressStr and returns the formatted address, or null on error (error
 // message already sent to chatId). Used by the NLP confirmation flow in bot.js.
@@ -50,21 +51,21 @@ export async function handleSetPlace(bot, chatId, placeName, addressStr, userId 
 // Example: /setplace home Seresponda Court, Kiambu Road
 export function registerSetPlace(bot) {
   bot.onText(/^\/setplace\s+(\S+)\s+(.+)$/i, async (msg, match) => {
-    const chatId = msg.chat.id;
+    const { chatId, userId } = resolveUserId(msg);
     try {
-      await handleSetPlace(bot, chatId, match[1], match[2]);
+      await handleSetPlace(bot, chatId, match[1], match[2], userId);
     } catch (err) {
       logger.error({ err }, 'setplace handler error');
     }
   });
 }
 
-// Register /places — list all saved places for this chat
+// Register /places — list saved places for the sender (per-user, even in a group)
 export function registerListPlaces(bot) {
   bot.onText(/^\/places$/, async (msg) => {
-    const chatId = msg.chat.id;
+    const { chatId, userId } = resolveUserId(msg);
     try {
-      const places = dbGetSavedPlaces(chatId);
+      const places = dbGetSavedPlaces(userId);
       const entries = Object.entries(places);
       if (!entries.length) {
         await bot.sendMessage(

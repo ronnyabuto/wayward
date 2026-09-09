@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import TelegramBot from 'node-telegram-bot-api';
 import { logger } from './utils/logger.js';
+import { resolveUserId } from './utils/telegram.js';
 import { registerStopwatch, registerListWatches, handleWatch, commitWatch } from './commands/watch.js';
 import { handleScenic } from './commands/scenic.js';
 import { handleCheck } from './commands/check.js';
@@ -57,13 +58,10 @@ bot.on('message', async (msg) => {
   const text = msg.text?.trim();
   if (!text || text.startsWith('/')) return;
 
-  const chatId  = msg.chat.id;
-  const isGroup = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
-
   // In groups: personal data (saved places, traffic history, personal baselines)
   // is keyed by the individual user so it follows them across private and group chats.
   // Notifications (watches, responses) go to chatId — the group in group context.
-  const userId = isGroup ? (msg.from?.id ?? chatId) : chatId;
+  const { chatId, userId } = resolveUserId(msg);
 
   try {
     // Confirmation gate: if this user has a pending setplace, resolve it first.
