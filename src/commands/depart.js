@@ -20,8 +20,10 @@ function fmtTime(date) {
 
 // Parse an NLP-produced "HH:MM" (Nairobi local 24 h) into a UTC Date.
 // If the resulting moment is already in the past, adds 24 h (tomorrow).
-function parseArriveBy(arriveByStr) {
-  const [h, m] = arriveByStr.split(':').map(Number);
+// Used for both arrive_by (arrival deadlines) and depart_after (departure-
+// window start times) — same "next upcoming occurrence" semantics either way.
+function parseTimeHHMM(timeStr) {
+  const [h, m] = timeStr.split(':').map(Number);
   const NAIROBI_OFFSET_MS = 3 * 60 * 60 * 1000; // UTC+3, no DST
   const nowMs = Date.now();
   const nairobiMs = nowMs + NAIROBI_OFFSET_MS;
@@ -30,7 +32,7 @@ function parseArriveBy(arriveByStr) {
   return new Date(targetMs <= nowMs ? targetMs + 86_400_000 : targetMs);
 }
 
-export async function handleDepart(bot, chatId, originStr, destinationStr, arriveBy = null, userId = null) {
+export async function handleDepart(bot, chatId, originStr, destinationStr, arriveBy = null, userId = null, departAfter = null) {
   let origin, destination;
   try {
     [origin, destination] = await Promise.all([geocode(originStr), geocode(destinationStr)]);
@@ -45,6 +47,17 @@ export async function handleDepart(bot, chatId, originStr, destinationStr, arriv
   }
 
   const dbId = userId ?? chatId;
+
+  // Deferred departure window: the user isn't ready now and gave a future
+  // start time ("any time from 4pm") instead of an arrival deadline. Checking
+  // current traffic here would answer a question they didn't ask, and would
+  // contradict an explicit "not yet" — schedule the check for departAfter
+  // instead, reusing the same scheduled_watch mechanism the far-future
+  // arrive_by path below already relies on.
+  if (!arriveBy && departAfter) {
+    await handleDepartAfter(bot, chatId, origin, destination, originStr, destinationStr, departAfter, dbId);
+    return;
+  }
 
   let current;
   try {
@@ -135,6 +148,62 @@ export async function handleDepart(bot, chatId, originStr, destinationStr, arriv
   commitWatch(chatId, originStr, destinationStr, threshold, origin.placeId, destination.placeId);
 }
 
+// "Ping me the best time to leave, any time from <departAfter>" — the user
+// isn't ready yet, so there's no live traffic to evaluate. Schedules a single
+// check at departAfter via the same pending_intents/scheduleTimedWatch
+// mechanism the far-future arrive_by path uses (arrive_at_sec is simply null
+// here — scheduleTimedWatch already handles that case, reporting the result
+// without an arrival-time framing). If traffic is still bad at that check,
+// scheduleTimedWatch falls back to a continuous watch until it clears — which
+// is exactly "tell me when traffic is least".
+async function handleDepartAfter(bot, chatId, origin, destination, originStr, destinationStr, departAfterStr, dbId) {
+  const departAfterDate = parseTimeHHMM(departAfterStr);
+  const originShort = originStr.split(',')[0];
+  const destShort   = destinationStr.split(',')[0];
+  const mapsLink    = `https://www.google.com/maps/dir/?api=1&origin=${origin.lat},${origin.lon}&destination=${destination.lat},${destination.lon}&travelmode=driving`;
+
+  // Threshold from the baseline at the hour the window opens, not the current
+  // hour — traffic an hour from now isn't traffic right now, and the baseline
+  // tables are already keyed by day_of_week/hour_of_day for exactly this.
+  const { dayOfWeek, hourOfDay } = getNairobiComponents(departAfterDate);
+  const personal = dbGetPersonalTypical(dbId, origin.formatted, destination.formatted, dayOfWeek, hourOfDay);
+  const pool     = !personal && origin.placeId && destination.placeId
+    ? dbGetPoolTypical(origin.placeId, destination.placeId, dayOfWeek, hourOfDay)
+    : null;
+
+  // No historical signal for that hour yet — a live probe now is a reasonable
+  // stand-in for the threshold; the scheduled check itself will use a real,
+  // live number regardless, this only decides what counts as "good enough".
+  let baselineMin = personal?.avgMin ?? pool?.avgMin ?? null;
+  if (baselineMin === null) {
+    try {
+      const probe = await getDurationSeconds(origin, destination);
+      baselineMin = probe ? Math.round(probe.staticSeconds / 60) : 30;
+    } catch {
+      baselineMin = 30;
+    }
+  }
+  const threshold = Math.ceil(baselineMin * ACCEPTABLE_RATIO);
+  const fireAtSec = Math.floor(departAfterDate.getTime() / 1000);
+
+  const pendingId = dbInsertPendingIntent(
+    dbId, chatId, 'scheduled_watch',
+    originStr, destinationStr, threshold, fireAtSec, null,
+    origin.placeId, destination.placeId,
+  );
+  scheduleTimedWatch(bot, {
+    id: pendingId, chat_id: chatId,
+    origin: originStr, destination: destinationStr,
+    threshold_min: threshold, fire_at: fireAtSec, arrive_at_sec: null,
+    origin_place_id: origin.placeId ?? null, dest_place_id: destination.placeId ?? null,
+  });
+
+  await bot.sendMessage(
+    chatId,
+    `Got it — I'll check ${originShort} → ${destShort} starting at ${fmtTime(departAfterDate)} and message you as soon as it's a good time to leave.\n${mapsLink}`
+  );
+}
+
 // Query the route at 15, 30, 45, 60, 90, 120 min intervals.
 // Results are cached in SQLite for 10 min, keyed by place ID pair + offset, so
 // concurrent users asking the same route share one set of probe results instead
@@ -191,7 +260,7 @@ async function handleDepartWithDeadline(
   bot, chatId, origin, destination, originStr, destinationStr,
   arriveByStr, current, baselineMin, baselineSource, dbId, mapsLink,
 ) {
-  const arriveByDate = parseArriveBy(arriveByStr);
+  const arriveByDate = parseTimeHHMM(arriveByStr);
   const nowMs = Date.now();
   const minLeft = (arriveByDate.getTime() - nowMs) / 60_000;
   const deadlineStr = fmtTime(arriveByDate);

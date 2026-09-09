@@ -34,5 +34,14 @@
       { "userMessage": "Karen to the Hub, how's traffic" },
       { "userMessage": "what about from Westlands instead?", "expect": { "command": "check", "originIncludes": "Westlands", "destinationIncludes": "Hub" } }
     ]
+  },
+  {
+    "id": "depart-after-with-carried-destination",
+    "note": "exact reproduction of the 2026-09-09 production bug report: a check establishes a destination, then a depart request with a new origin and a future start time ('any time from 4 pm') must carry the destination forward AND set depart_after — not check current traffic and say 'leave when you're ready' at 3:23pm, ignoring the stated 4pm start.",
+    "savedPlaces": {},
+    "turns": [
+      { "userMessage": "distance from maisha development in tilisi to palace apartment in limuru road" },
+      { "userMessage": "ping me best time to leave Burn Manufacturing in Westlands any time from 4 pm when the traffic is least.", "expect": { "command": "depart", "originIncludes": "Burn Manufacturing", "destinationIncludes": "Palace", "depart_after": "16:00" } }
+    ]
   }
 ]

@@ -56,6 +56,9 @@ test('multi-turn context carry-forward golden set', { skip: !shouldRun && 'set R
         if ('destinationIncludes' in exp && !(intent.destination ?? '').toLowerCase().includes(exp.destinationIncludes.toLowerCase())) {
           mismatches.push(`destination: expected to include "${exp.destinationIncludes}", got "${intent.destination}"`);
         }
+        if ('depart_after' in exp && intent.depart_after !== exp.depart_after) {
+          mismatches.push(`depart_after: expected ${JSON.stringify(exp.depart_after)}, got ${JSON.stringify(intent.depart_after)}`);
+        }
 
         if (mismatches.length > 0) {
           failures.push(`[${thread.id}] turn "${turn.userMessage}"\n    ${mismatches.join('\n    ')}`);

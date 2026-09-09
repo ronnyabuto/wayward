@@ -137,5 +137,29 @@
     "savedPlaces": {},
     "conversationHistory": [],
     "expect": { "command": "unknown" }
+  },
+  {
+    "id": "depart-after-future-window",
+    "note": "2026-09-09 production bug: 'ping me best time to leave X any time from 4pm' was misclassified as depart case (a) 'ready now', checking current traffic and replying 'leave when you're ready' — flatly ignoring the stated future start time. depart_after is the fix.",
+    "userMessage": "ping me the best time to leave Karen any time from 4pm, heading to CBD",
+    "savedPlaces": {},
+    "conversationHistory": [],
+    "expect": { "command": "depart", "arrive_by": null, "depart_after": "16:00", "originIncludes": "Karen", "destinationIncludes": "CBD" }
+  },
+  {
+    "id": "depart-after-relative-phrasing",
+    "note": "different phrasing for the same case (c) — 'sometime after 6pm' rather than 'any time from 4pm'",
+    "userMessage": "sometime after 6pm, let me know when it's good to leave Westlands for the airport",
+    "savedPlaces": {},
+    "conversationHistory": [],
+    "expect": { "command": "depart", "arrive_by": null, "depart_after": "18:00", "destinationIncludes": "Embakasi" }
+  },
+  {
+    "id": "depart-after-vs-arrive-by-mutual-exclusion",
+    "note": "both a start time AND a deadline stated — must resolve as case (b), not case (c). depart_after must stay null.",
+    "userMessage": "starting from 4pm, I need to be at JKIA by 7pm from Karen",
+    "savedPlaces": {},
+    "conversationHistory": [],
+    "expect": { "command": "depart", "arrive_by": "19:00", "depart_after": null }
   }
 ]

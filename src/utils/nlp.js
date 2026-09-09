@@ -121,11 +121,11 @@ let keyIndex = 0;
 
 // Constrained-decoding schema: Gemini's FSM enforces this at token-generation time,
 // making it impossible to emit a value outside the enum or a field of the wrong type.
-// All 7 fields are required so intent.command etc. are never undefined — only null.
+// All fields are required so intent.command etc. are never undefined — only null.
 // Field order matches the system prompt to avoid model confusion (per Gemini docs).
 const RESPONSE_SCHEMA = {
   type: 'object',
-  required: ['command', 'origin', 'destination', 'threshold', 'arrive_by', 'place_name', 'place_address', 'route_number', 'corridor', 'clarification'],
+  required: ['command', 'origin', 'destination', 'threshold', 'arrive_by', 'depart_after', 'place_name', 'place_address', 'route_number', 'corridor', 'clarification'],
   properties: {
     command: {
       type: 'string',
@@ -151,6 +151,11 @@ const RESPONSE_SCHEMA = {
       type: 'string',
       nullable: true,
       description: 'Arrival deadline in HH:MM 24-hour format (e.g. "18:00"). Set only for depart when the user names a specific time they must arrive by. Null for all other commands.',
+    },
+    depart_after: {
+      type: 'string',
+      nullable: true,
+      description: 'Departure-window start time in HH:MM 24-hour format (e.g. "16:00"). Set only for depart when the user is not ready now and names a future time to start looking for a good time to leave (e.g. "any time from 4pm", "sometime after 6"), with NO arrival deadline stated. Mutually exclusive with arrive_by — if both a start time and a deadline are stated, set arrive_by and leave this null. Null for all other commands and for the immediate "ready now" case.',
     },
     place_name: {
       type: 'string',
@@ -189,6 +194,7 @@ Given a user message, their saved locations, and the current local time, return 
   "destination": "<place name or null>",
   "threshold": <number | null>,
   "arrive_by": "<HH:MM or null>",
+  "depart_after": "<HH:MM or null>",
   "place_name": "<name to save or null>",
   "place_address": "<address to save or null>",
   "corridor": "<road or highway name, or null>",
@@ -198,10 +204,11 @@ Given a user message, their saved locations, and the current local time, return 
 Commands:
 - "check": one-time traffic query. User wants to know how long the drive is right now. Use when they ask how traffic is or how long a drive takes, with no stated arrival deadline (e.g. "how's traffic to town?", "how long is the drive to Karen?", "when should I leave in the next 20 min" — that last one is a departure window, not a deadline).
 - "watch": persistent alert. User wants to be notified when a specific route drops below a travel-time threshold they name explicitly (e.g. "tell me when it's under 40 min", "alert me when I can get there in less than an hour"). threshold is the target travel time in minutes — NOT a departure window.
-- "depart": smart departure advisor. Use when the user wants to know when to leave — either because they're ready now, or because they have an arrival deadline. Covers:
+- "depart": smart departure advisor. Use when the user wants to know when to leave — because they're ready now, because they have an arrival deadline, or because they want to be told the best time within a future window. Covers:
   (a) Ready to leave: "I'm done with work", "heading home", "leaving soon", "is traffic bad now?", "should I go now?"
   (b) Arrival deadline: "I want to be at X before 6pm", "I need to be seated by 7", "I have a 9am meeting", "will I make it by 8 if I leave now?", "when should I leave to arrive before X?"
-  Set arrive_by to the deadline (HH:MM 24-hour) when the user states one; null for case (a).
+  (c) Deferred departure window: the user is NOT ready now and names a future time to start looking, with no arrival deadline — "ping me the best time to leave any time from 4pm", "check starting at 6 and tell me when it's good", "sometime after 5, let me know when traffic's least". This is NOT the same as case (a): checking right now would answer a question the user didn't ask, and would contradict an explicit "not yet". Set depart_after to that start time (HH:MM 24-hour); leave arrive_by null.
+  Set arrive_by to the deadline (HH:MM 24-hour) for case (b); set depart_after for case (c); both null for case (a). Never set both arrive_by and depart_after on the same response — if the user states both a start time and a deadline, that's case (b): set arrive_by and leave depart_after null.
 - "setplace": user is saving a location. Use ONLY when they explicitly declare a place with words like "my home is", "save my work as", "I live at", "set home to", etc. Do NOT use setplace when the user simply states a location as their current position or as an answer to "where are you leaving from?" — that is an origin for a routing command, not a place to save.
 - "scenic": user wants the most scenic driving route between two places.
 - "matatu": user is asking about public transit / matatu conditions on a road corridor. Use when they mention "matatu", "mat", "route [number]", "stage", or ask about public transport. Set route_number if they specify one (e.g., "Route 23" → "23"); set origin/destination if they name the corridor; set both if possible.
@@ -216,6 +223,7 @@ Key distinctions:
 - Explicit threshold vs. vague notification: "watch" requires a number the user actually stated ("tell me when it drops under 20 min" → watch, threshold 20). A vague request with no number ("tell me when traffic clears", "notify me when it eases") → "depart" with arrive_by null; depart auto-sets its own threshold. Never invent a threshold for watch.
 - Notification framing never overrides a stated deadline: verbs like ping/tell/remind/notify/alert describe HOW the user wants the result delivered, not WHETHER a deadline applies. If a deadline is present anywhere in the message, extract arrive_by regardless of how the notification is phrased — e.g. "I have a 9am meeting, ping me when to leave" → depart, arrive_by="09:00". Only when there is no deadline anywhere in the message does notification phrasing alone mean arrive_by=null.
 - Back-reference to a just-given result: if the most recent turn was a depart with an arrive_by, and the user replies with a bare acknowledgement of wanting to be notified ("can you ping at that time?", "remind me then", "set that up") with no new deadline or location stated — that converts the standing arrive_by into a watch on the same origin/destination, threshold null. Do not apply this if the current message itself states a new time or deadline. (For the more general case of filling a missing slot or carrying a route forward across turns, see Conversation context below — this rule is specifically about converting a result into a notification request, which that section doesn't cover.)
+- Notification framing + future start time, no deadline: "ping me best time to leave X any time from 4pm when traffic is least" is depart case (c), NOT case (a) — the user is not ready now, they gave a future start time. Checking current traffic and replying "leave when you're ready" is wrong here even if current traffic happens to be fine, because the user explicitly said not yet. Set depart_after="16:00", arrive_by=null, threshold=null.
 
 Other rules:
 - origin and destination: Output in the format "<POI or address>, <neighbourhood>, <city>, Kenya". Always include city and country. Omit neighbourhood only if unknown. No abbreviations, no trailing punctuation. Examples: "Sarit Centre, Westlands, Nairobi, Kenya"; "JKIA, Embakasi, Nairobi, Kenya"; "Garden City Mall, Thika Road, Nairobi, Kenya"; "Mombasa CBD, Mombasa, Kenya". Never invent a place.
@@ -224,7 +232,8 @@ Other rules:
   - AM/PM ambiguity: if no am/pm is stated, infer the next upcoming occurrence from current time. "by 7" at 6 PM → "19:00". "by 7" at 6 AM → "07:00". "by 7" at 11 PM → "07:00" (next morning, but still return "07:00").
   - Relative deadlines: convert to absolute HH:MM using current local time. "in 45 minutes" at 17:10 → "17:55". "within the hour" at 16:40 → "17:40".
   - Return null for arrive_by on all non-depart commands, and for depart when no deadline is stated.
-- For all other commands, threshold and arrive_by must be null.
+- depart_after: only for "depart" case (c) — the user names a future time to START looking, not an arrival deadline ("any time from 4pm", "sometime after 6", "starting at 5:30"). Same AM/PM-ambiguity and relative-time rules as arrive_by apply to resolving the HH:MM. Null whenever arrive_by is set, and null for the immediate "ready now" case.
+- For all other commands, threshold, arrive_by, and depart_after must be null.
 - Road and highway names (e.g. Thika Road, Ngong Road, Mombasa Road, Waiyaki Way, Langata Road, Uhuru Highway, Jogoo Road, Eastern Bypass, Southern Bypass, Northern Bypass) identify a corridor — not an origin or destination. When the user says "how is [road] from X to Y", set origin=X and destination=Y. The road name belongs in corridor only. Never assign a road or highway name to origin or destination. Example: "how thika road looking right now from kahawa sukari to cbd?" → check, origin="Kahawa Sukari, Nairobi, Kenya", destination="Nairobi CBD, Kenya", corridor="Thika Road".
 - route_number is only set for "matatu"; null for all other commands.
 - Messages may be in English, Swahili, or Sheng (Nairobi street slang). Extract intent and place names regardless of language. Key terms: 'nataka kwenda'/'naenda' = going to, 'town' = Nairobi CBD, 'stage' = matatu terminus, 'mbaya' = bad/heavy traffic, 'safi' = clear/good.

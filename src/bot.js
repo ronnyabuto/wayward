@@ -237,7 +237,7 @@ bot.on('message', async (msg) => {
     }
 
     if (intent.command === 'depart') {
-      await handleDepart(bot, chatId, intent.origin, intent.destination, intent.arrive_by ?? null, userId);
+      await handleDepart(bot, chatId, intent.origin, intent.destination, intent.arrive_by ?? null, userId, intent.depart_after ?? null);
       return;
     }
 

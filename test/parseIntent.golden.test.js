@@ -53,6 +53,9 @@ test('parseIntent golden set', { skip: !shouldRun && 'set RUN_GOLDEN_TESTS=1 to 
     if ('arrive_by' in exp && intent.arrive_by !== exp.arrive_by) {
       mismatches.push(`arrive_by: expected ${JSON.stringify(exp.arrive_by)}, got ${JSON.stringify(intent.arrive_by)}`);
     }
+    if ('depart_after' in exp && intent.depart_after !== exp.depart_after) {
+      mismatches.push(`depart_after: expected ${JSON.stringify(exp.depart_after)}, got ${JSON.stringify(intent.depart_after)}`);
+    }
     if ('threshold' in exp && intent.threshold !== exp.threshold) {
       mismatches.push(`threshold: expected ${exp.threshold}, got ${intent.threshold}`);
     }
