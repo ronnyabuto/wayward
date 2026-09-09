@@ -1,0 +1,38 @@
+[
+  {
+    "id": "watch-to-depart-carryforward",
+    "note": "system prompt Key distinctions example, line ~210 — prior watch's origin/destination carried into a bare 'when should I leave?'",
+    "savedPlaces": {},
+    "turns": [
+      { "userMessage": "watch Sarit Centre to the Hub Karen, tell me when it's under 30 min" },
+      { "userMessage": "when should I leave?", "expect": { "command": "depart", "originIncludes": "Sarit", "destinationIncludes": "Karen" } }
+    ]
+  },
+  {
+    "id": "depart-arriveby-to-watch-backreference",
+    "note": "research_nlp_memory_architecture.md Bug 2 — a back-reference to a just-given result ('at that time') must resolve to watch, not re-run the same depart forecast",
+    "savedPlaces": {},
+    "turns": [
+      { "userMessage": "I need to be at Sarit Centre by 9pm, I'm at the Hub Karen" },
+      { "userMessage": "can you ping me at that time?", "expect": { "command": "watch", "originIncludes": "Karen", "destinationIncludes": "Sarit" } }
+    ]
+  },
+  {
+    "id": "bare-location-fills-null-origin-not-setplace",
+    "note": "bugs_fixed.md — a bare location reply after an incomplete depart must fill the missing origin slot, never save as a place",
+    "savedPlaces": {},
+    "turns": [
+      { "userMessage": "when should I leave to get to the Hub Karen by 6pm?" },
+      { "userMessage": "Sarit Centre, Westlands", "expect": { "command": "depart", "originIncludes": "Sarit", "destinationIncludes": "Karen" } }
+    ]
+  },
+  {
+    "id": "swap-one-location-carries-the-other",
+    "note": "system prompt Conversation context rule — changing only one location carries the unchanged one forward verbatim",
+    "savedPlaces": {},
+    "turns": [
+      { "userMessage": "Karen to the Hub, how's traffic" },
+      { "userMessage": "what about from Westlands instead?", "expect": { "command": "check", "originIncludes": "Westlands", "destinationIncludes": "Hub" } }
+    ]
+  }
+]

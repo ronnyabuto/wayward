@@ -1,0 +1,56 @@
+=== CHECK/MATATU ROUTING INTACT ===
+"traffic from Westlands to CBD" => {
+  command: 'check',
+  origin: 'traffic from Westlands',
+  destination: 'CBD',
+  route_number: null
+}
+"how long from Karen to CBD" => {
+  command: 'check',
+  origin: 'Karen',
+  destination: 'CBD',
+  route_number: null
+}
+"matatu from CBD to Kibera" => {
+  command: 'matatu',
+  origin: 'from CBD',
+  destination: 'Kibera',
+  route_number: null
+}
+"route 23 matatu" => {
+  command: 'matatu',
+  origin: null,
+  destination: null,
+  route_number: '23'
+}
+
+=== FALSE POSITIVES (Legitimate uses of by/before that are NOT deadlines) ===
+"matatu CBD to Westlands via by-pass" => {
+  command: 'matatu',
+  origin: 'CBD',
+  destination: 'Westlands',
+  route_number: null
+}
+"how long by road from Karen to CBD" => {
+  command: 'check',
+  origin: 'Karen',
+  destination: 'CBD',
+  route_number: null
+}
+"route passing by Sarit Centre to Karen" => {
+  command: 'check',
+  origin: 'route passing by Sarit Centre',
+  destination: 'Karen',
+  route_number: null
+}
+
+=== FALSE NEGATIVES (Deadlines missed by current regex) ===
+"Palace Apartments to Burn Manufacturing before 8" => {
+  command: 'check',
+  origin: 'Palace Apartments',
+  destination: 'Burn Manufacturing before 8',
+  route_number: null
+}
+"I need to be there by 08:00" => null
+"niende lini ili nifike by 8" => null
+"I have a 9am meeting at Westlands" => null

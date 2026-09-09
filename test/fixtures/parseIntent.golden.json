@@ -1,0 +1,141 @@
+[
+  {
+    "id": "deadline-departure-question",
+    "note": "git 6e16435 — was hitting the quickClassify \\bto\\b catch-all before Gemini ever saw the deadline",
+    "userMessage": "what time should I leave Palace Apartments to get to Burn Manufacturing by 8am",
+    "savedPlaces": {},
+    "conversationHistory": [],
+    "expect": { "command": "depart", "arrive_by": "08:00", "originIncludes": "Palace Apartments", "destinationIncludes": "Burn Manufacturing" }
+  },
+  {
+    "id": "deadline-basic-by-time",
+    "note": "system prompt key-distinction example",
+    "userMessage": "I need to be at work by 9",
+    "savedPlaces": { "work": "Westlands, Nairobi, Kenya" },
+    "conversationHistory": [],
+    "expect": { "command": "depart", "arrive_by": "09:00" }
+  },
+  {
+    "id": "deadline-will-i-make-it",
+    "note": "system prompt key-distinction example. Uses explicit am/pm — the bare '8' variant is genuinely AM/PM-ambiguous per the system prompt's own 'next upcoming occurrence from current time' rule, so it isn't safe to pin to one exact value in a wall-clock-independent golden set",
+    "userMessage": "will I make it to JKIA by 8am?",
+    "savedPlaces": {},
+    "conversationHistory": [],
+    "expect": { "command": "depart", "arrive_by": "08:00", "destinationIncludes": "JKIA" }
+  },
+  {
+    "id": "notification-plus-deadline-ping",
+    "note": "git 9e64aa3 — the CRITICAL system-prompt rule this protects: notification framing must not drop the deadline",
+    "userMessage": "I have a 9am meeting, ping me when to leave",
+    "savedPlaces": {},
+    "conversationHistory": [
+      { "userMessage": "I'm at Sarit Centre, need to get to the office", "modelResponse": "{\"command\":\"unknown\",\"origin\":\"Sarit Centre, Westlands, Nairobi, Kenya\",\"destination\":null,\"threshold\":null,\"arrive_by\":null,\"place_name\":null,\"place_address\":null,\"route_number\":null,\"corridor\":null,\"clarification\":\"Where is your office?\"}" }
+    ],
+    "expect": { "command": "depart", "arrive_by": "09:00" }
+  },
+  {
+    "id": "notification-plus-deadline-remind",
+    "note": "same CRITICAL rule, different phrasing (\"remind\" instead of \"ping\"). Destination check uses \"Embakasi\" (the airport's neighbourhood) rather than \"airport\" or \"JKIA\" — Gemini resolves this to either \"JKIA\" or the full \"Jomo Kenyatta International Airport\" depending on the call, and \"Embakasi\" is the one substring present in both, so the assertion isn't coupled to which form comes back",
+    "userMessage": "I need to be at the airport by 3pm, tell me when to head out",
+    "savedPlaces": {},
+    "conversationHistory": [],
+    "expect": { "command": "depart", "arrive_by": "15:00", "destinationIncludes": "Embakasi" }
+  },
+  {
+    "id": "no-explicit-threshold-clears",
+    "note": "bugs_fixed.md — \"tell me when traffic clears\" was invented a threshold and misrouted to watch",
+    "userMessage": "I'm at Sarit Centre. I want to go to the Hub Karen. tell me when traffic clears.",
+    "savedPlaces": {},
+    "conversationHistory": [],
+    "expect": { "command": "depart", "arrive_by": null, "originIncludes": "Sarit", "destinationIncludes": "Karen" }
+  },
+  {
+    "id": "explicit-watch-threshold",
+    "note": "contrast case for the one above — explicit number must still route to watch",
+    "userMessage": "Sarit Centre to the Hub Karen, tell me when it drops under 40 min",
+    "savedPlaces": {},
+    "conversationHistory": [],
+    "expect": { "command": "watch", "threshold": 40 }
+  },
+  {
+    "id": "departure-window-not-deadline",
+    "note": "system prompt key-distinction — \"in the next 20 min\" is a window, not a deadline",
+    "userMessage": "when should I leave in the next 20 min",
+    "savedPlaces": {},
+    "conversationHistory": [
+      { "userMessage": "Karen to CBD", "modelResponse": "{\"command\":\"check\",\"origin\":\"Karen, Nairobi, Kenya\",\"destination\":\"Nairobi CBD, Kenya\",\"threshold\":null,\"arrive_by\":null,\"place_name\":null,\"place_address\":null,\"route_number\":null,\"corridor\":null,\"clarification\":null}" }
+    ],
+    "expect": { "command": "check" }
+  },
+  {
+    "id": "ready-now-no-deadline",
+    "note": "case (a) from the depart command description",
+    "userMessage": "I'm done with work, heading home",
+    "savedPlaces": { "home": "Seresponda Court, Nairobi, Kenya", "work": "Westlands, Nairobi, Kenya" },
+    "conversationHistory": [],
+    "expect": { "command": "depart", "arrive_by": null }
+  },
+  {
+    "id": "setplace-explicit-declaration",
+    "note": "system prompt key-distinction example",
+    "userMessage": "my home is at Seresponda Court",
+    "savedPlaces": {},
+    "conversationHistory": [],
+    "expect": { "command": "setplace", "place_name": "home" }
+  },
+  {
+    "id": "corridor-not-origin",
+    "note": "bugs_fixed.md — 0-min bug: road name must go to corridor, not origin/destination",
+    "userMessage": "how thika road looking right now from kahawa sukari to cbd?",
+    "savedPlaces": {},
+    "conversationHistory": [],
+    "expect": { "command": "check", "originIncludes": "Kahawa Sukari", "destinationIncludes": "CBD", "corridorIncludes": "Thika" }
+  },
+  {
+    "id": "corridor-ngong-road",
+    "userMessage": "Ngong Road traffic from Karen to town",
+    "savedPlaces": {},
+    "conversationHistory": [],
+    "expect": { "command": "check", "originIncludes": "Karen", "corridorIncludes": "Ngong" }
+  },
+  {
+    "id": "matatu-with-corridor",
+    "userMessage": "matatu on Mombasa Road from EPZ to CBD",
+    "savedPlaces": {},
+    "conversationHistory": [],
+    "expect": { "command": "matatu", "corridorIncludes": "Mombasa" }
+  },
+  {
+    "id": "swahili-deadline",
+    "note": "Swahili departure-question phrasing (niende lini). Explicit am/pm for the same wall-clock-independence reason as deadline-will-i-make-it above",
+    "userMessage": "niende lini ili nifike Westlands by 8am",
+    "savedPlaces": {},
+    "conversationHistory": [],
+    "expect": { "command": "depart", "arrive_by": "08:00" }
+  },
+  {
+    "id": "sheng-code-switched-deadline",
+    "note": "Sheng/Swahili/English code-switching — 'nataka kufika' = want to arrive, 'niko' = I'm at",
+    "userMessage": "nataka kufika town by 8am, niko Karen",
+    "savedPlaces": {},
+    "conversationHistory": [],
+    "expect": { "command": "depart", "arrive_by": "08:00", "originIncludes": "Karen" }
+  },
+  {
+    "id": "offtopic-no-route-carryforward",
+    "note": "system prompt Conversation context rule — off-topic must not inherit a prior route",
+    "userMessage": "what's the weather like today",
+    "savedPlaces": {},
+    "conversationHistory": [
+      { "userMessage": "Sarit Centre to the Hub Karen", "modelResponse": "{\"command\":\"check\",\"origin\":\"Sarit Centre, Westlands, Nairobi, Kenya\",\"destination\":\"The Hub, Karen, Nairobi, Kenya\",\"threshold\":null,\"arrive_by\":null,\"place_name\":null,\"place_address\":null,\"route_number\":null,\"corridor\":null,\"clarification\":null}" }
+    ],
+    "expect": { "command": "unknown" }
+  },
+  {
+    "id": "unsaved-place-reference",
+    "userMessage": "how long from work to home",
+    "savedPlaces": {},
+    "conversationHistory": [],
+    "expect": { "command": "unknown" }
+  }
+]
