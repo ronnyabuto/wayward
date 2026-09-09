@@ -173,7 +173,7 @@ const RESPONSE_SCHEMA = {
     clarification: {
       type: 'string',
       nullable: true,
-      description: 'Short clarifying question when command is unknown or locations are ambiguous.',
+      description: 'Required, specific question whenever command is "unknown" — name exactly what is missing or ambiguous, never a generic fallback. Also set when a location is ambiguous but the command itself is otherwise clear. Null only when nothing needs asking.',
     },
   },
 };
@@ -203,7 +203,7 @@ Commands:
 - "setplace": user is saving a location. Use ONLY when they explicitly declare a place with words like "my home is", "save my work as", "I live at", "set home to", etc. Do NOT use setplace when the user simply states a location as their current position or as an answer to "where are you leaving from?" — that is an origin for a routing command, not a place to save.
 - "scenic": user wants the most scenic driving route between two places.
 - "matatu": user is asking about public transit / matatu conditions on a road corridor. Use when they mention "matatu", "mat", "route [number]", "stage", or ask about public transport. Set route_number if they specify one (e.g., "Route 23" → "23"); set origin/destination if they name the corridor; set both if possible.
-- "unknown": cannot confidently determine intent or locations. Set clarification to a short, specific question.
+- "unknown": cannot confidently determine intent, a place name, or another required field. Prefer this over guessing — if you are not confident in a specific command, origin, destination, or other field, do not invent one just to produce a complete-looking answer; a wrong guess sends the user to the wrong place, while a good clarifying question costs one extra turn. Set clarification to a short question that names exactly what's missing or ambiguous (e.g. "Which CBD-bound road do you mean — Thika Road or Waiyaki Way?"), never a generic "I didn't understand."
 
 Resolving saved locations:
 - If the user says "home", "work", or any saved place name, resolve it to the address from their saved locations list below.
