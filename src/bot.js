@@ -174,6 +174,12 @@ bot.on('message', async (msg) => {
     dbPersistTurn(userId, chatId, text, JSON.stringify(intent), wing, room);
 
     if (intent.command === 'unknown') {
+      // Instrumentation: this is the bot's only visibility into what real users
+      // say that neither layer can resolve. Without this, the only feedback
+      // loop is "someone got annoyed enough to complain," which biases every
+      // fix toward a narrow, reported subset of what's actually breaking.
+      // Grep `low-confidence classification` in the PM2 logs to sample these.
+      logger.warn({ chatId, text, clarification: intent.clarification }, 'low-confidence classification');
       await bot.sendMessage(
         chatId,
         intent.clarification ?? `I didn't quite catch that. Try: "I'm heading home from work" or "matatu CBD to Westlands".`
