@@ -56,8 +56,17 @@ test('multi-turn context carry-forward golden set', { skip: !shouldRun && 'set R
         if ('destinationIncludes' in exp && !(intent.destination ?? '').toLowerCase().includes(exp.destinationIncludes.toLowerCase())) {
           mismatches.push(`destination: expected to include "${exp.destinationIncludes}", got "${intent.destination}"`);
         }
+        if ('commandIn' in exp && !exp.commandIn.includes(intent.command)) {
+          mismatches.push(`command: expected one of ${JSON.stringify(exp.commandIn)}, got "${intent.command}"`);
+        }
         if ('depart_after' in exp && intent.depart_after !== exp.depart_after) {
           mismatches.push(`depart_after: expected ${JSON.stringify(exp.depart_after)}, got ${JSON.stringify(intent.depart_after)}`);
+        }
+        if ('departAfterSet' in exp && !!intent.depart_after !== exp.departAfterSet) {
+          mismatches.push(`depart_after: expected ${exp.departAfterSet ? 'a start time' : 'null'}, got ${JSON.stringify(intent.depart_after)}`);
+        }
+        if ('threshold' in exp && intent.threshold !== exp.threshold) {
+          mismatches.push(`threshold: expected ${exp.threshold}, got ${intent.threshold}`);
         }
 
         if (mismatches.length > 0) {

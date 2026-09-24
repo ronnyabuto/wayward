@@ -50,6 +50,12 @@ test('parseIntent golden set', { skip: !shouldRun && 'set RUN_GOLDEN_TESTS=1 to 
     if ('command' in exp && intent.command !== exp.command) {
       mismatches.push(`command: expected "${exp.command}", got "${intent.command}"`);
     }
+    if ('commandIn' in exp && !exp.commandIn.includes(intent.command)) {
+      mismatches.push(`command: expected one of ${JSON.stringify(exp.commandIn)}, got "${intent.command}"`);
+    }
+    if ('departAfterSet' in exp && !!intent.depart_after !== exp.departAfterSet) {
+      mismatches.push(`depart_after: expected ${exp.departAfterSet ? 'a start time' : 'null'}, got ${JSON.stringify(intent.depart_after)}`);
+    }
     if ('arrive_by' in exp && intent.arrive_by !== exp.arrive_by) {
       mismatches.push(`arrive_by: expected ${JSON.stringify(exp.arrive_by)}, got ${JSON.stringify(intent.arrive_by)}`);
     }

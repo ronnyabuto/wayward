@@ -243,7 +243,15 @@ bot.on('message', async (msg) => {
 
     if (intent.command === 'watch') {
       const t = intent.threshold;
-      if (!t || t < 1 || t > 300) {
+      const hasThreshold = t >= 1 && t <= 300;
+      // A start time ("start watching at 9:20pm") means current traffic is
+      // irrelevant — schedule the watch for then, with the user's threshold if
+      // they gave one, otherwise the baseline-derived one depart would use.
+      if (intent.depart_after) {
+        await handleDepart(bot, chatId, intent.origin, intent.destination, null, userId, intent.depart_after, hasThreshold ? t : null);
+        return;
+      }
+      if (!hasThreshold) {
         // No explicit threshold: "tell me when traffic clears" is depart semantics —
         // handleDepart auto-sets the threshold at ceil(typicalMin * 1.2) and watches
         // until it's met. Only fall back to asking if we have no locations either.

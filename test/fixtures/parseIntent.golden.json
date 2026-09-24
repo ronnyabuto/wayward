@@ -161,5 +161,21 @@
     "savedPlaces": {},
     "conversationHistory": [],
     "expect": { "command": "depart", "arrive_by": "19:00", "depart_after": null }
+  },
+  {
+    "id": "watch-threshold-is-a-duration-not-an-offset",
+    "note": "control for the 2026-09-24 'in 30 min' fix: 'under 30 min' is a travel duration and must still be a threshold with no start time",
+    "userMessage": "watch Karen to the CBD and tell me when it's under 30 min",
+    "savedPlaces": {},
+    "conversationHistory": [],
+    "expect": { "command": "watch", "threshold": 30, "departAfterSet": false }
+  },
+  {
+    "id": "by-clock-time-is-a-deadline-not-a-threshold",
+    "note": "the initial-commit rule 'if user says by 7am, subtract current time' into threshold was removed — a clock deadline is depart arrive_by",
+    "userMessage": "alert me so I get to JKIA from Karen by 7am",
+    "savedPlaces": {},
+    "conversationHistory": [],
+    "expect": { "command": "depart", "arrive_by": "07:00", "threshold": null }
   }
 ]

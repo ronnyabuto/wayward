@@ -32,7 +32,10 @@ function parseTimeHHMM(timeStr) {
   return new Date(targetMs <= nowMs ? targetMs + 86_400_000 : targetMs);
 }
 
-export async function handleDepart(bot, chatId, originStr, destinationStr, arriveBy = null, userId = null, departAfter = null) {
+// explicitThreshold only applies with departAfter: a watch with a start time
+// ("start watching at 9pm, tell me when it's under 40") keeps the user's own
+// number instead of the baseline-derived one.
+export async function handleDepart(bot, chatId, originStr, destinationStr, arriveBy = null, userId = null, departAfter = null, explicitThreshold = null) {
   let origin, destination;
   try {
     [origin, destination] = await Promise.all([geocode(originStr), geocode(destinationStr)]);
@@ -55,7 +58,7 @@ export async function handleDepart(bot, chatId, originStr, destinationStr, arriv
   // instead, reusing the same scheduled_watch mechanism the far-future
   // arrive_by path below already relies on.
   if (!arriveBy && departAfter) {
-    await handleDepartAfter(bot, chatId, origin, destination, originStr, destinationStr, departAfter, dbId);
+    await handleDepartAfter(bot, chatId, origin, destination, originStr, destinationStr, departAfter, dbId, explicitThreshold);
     return;
   }
 
@@ -156,16 +159,38 @@ export async function handleDepart(bot, chatId, originStr, destinationStr, arriv
 // without an arrival-time framing). If traffic is still bad at that check,
 // scheduleTimedWatch falls back to a continuous watch until it clears — which
 // is exactly "tell me when traffic is least".
-async function handleDepartAfter(bot, chatId, origin, destination, originStr, destinationStr, departAfterStr, dbId) {
+async function handleDepartAfter(bot, chatId, origin, destination, originStr, destinationStr, departAfterStr, dbId, explicitThreshold = null) {
   const departAfterDate = parseTimeHHMM(departAfterStr);
   const originShort = originStr.split(',')[0];
   const destShort   = destinationStr.split(',')[0];
   const mapsLink    = `https://www.google.com/maps/dir/?api=1&origin=${origin.lat},${origin.lon}&destination=${destination.lat},${destination.lon}&travelmode=driving`;
 
-  // Threshold from the baseline at the hour the window opens, not the current
-  // hour — traffic an hour from now isn't traffic right now, and the baseline
-  // tables are already keyed by day_of_week/hour_of_day for exactly this.
-  const { dayOfWeek, hourOfDay } = getNairobiComponents(departAfterDate);
+  const threshold = explicitThreshold ?? await baselineThresholdAt(origin, destination, departAfterDate, dbId);
+  const fireAtSec = Math.floor(departAfterDate.getTime() / 1000);
+
+  const pendingId = dbInsertPendingIntent(
+    dbId, chatId, 'scheduled_watch',
+    originStr, destinationStr, threshold, fireAtSec, null,
+    origin.placeId, destination.placeId,
+  );
+  scheduleTimedWatch(bot, {
+    id: pendingId, chat_id: chatId,
+    origin: originStr, destination: destinationStr,
+    threshold_min: threshold, fire_at: fireAtSec, arrive_at_sec: null,
+    origin_place_id: origin.placeId ?? null, dest_place_id: destination.placeId ?? null,
+  });
+
+  await bot.sendMessage(
+    chatId,
+    `Got it — I'll start watching ${originShort} → ${destShort} at ${fmtTime(departAfterDate)} and message you as soon as the drive is under ${threshold} min.\n${mapsLink}`
+  );
+}
+
+// Threshold from the baseline at the hour the window opens, not the current
+// hour — traffic an hour from now isn't traffic right now, and the baseline
+// tables are already keyed by day_of_week/hour_of_day for exactly this.
+async function baselineThresholdAt(origin, destination, startDate, dbId) {
+  const { dayOfWeek, hourOfDay } = getNairobiComponents(startDate);
   const personal = dbGetPersonalTypical(dbId, origin.formatted, destination.formatted, dayOfWeek, hourOfDay);
   const pool     = !personal && origin.placeId && destination.placeId
     ? dbGetPoolTypical(origin.placeId, destination.placeId, dayOfWeek, hourOfDay)
@@ -183,25 +208,7 @@ async function handleDepartAfter(bot, chatId, origin, destination, originStr, de
       baselineMin = 30;
     }
   }
-  const threshold = Math.ceil(baselineMin * ACCEPTABLE_RATIO);
-  const fireAtSec = Math.floor(departAfterDate.getTime() / 1000);
-
-  const pendingId = dbInsertPendingIntent(
-    dbId, chatId, 'scheduled_watch',
-    originStr, destinationStr, threshold, fireAtSec, null,
-    origin.placeId, destination.placeId,
-  );
-  scheduleTimedWatch(bot, {
-    id: pendingId, chat_id: chatId,
-    origin: originStr, destination: destinationStr,
-    threshold_min: threshold, fire_at: fireAtSec, arrive_at_sec: null,
-    origin_place_id: origin.placeId ?? null, dest_place_id: destination.placeId ?? null,
-  });
-
-  await bot.sendMessage(
-    chatId,
-    `Got it — I'll check ${originShort} → ${destShort} starting at ${fmtTime(departAfterDate)} and message you as soon as it's a good time to leave.\n${mapsLink}`
-  );
+  return Math.ceil(baselineMin * ACCEPTABLE_RATIO);
 }
 
 // Query the route at 15, 30, 45, 60, 90, 120 min intervals.
