@@ -265,12 +265,59 @@ function parseQuotaError(text) {
   return { retryDelaySec, isPerDay };
 }
 
+// Statuses where the same request can succeed if sent again: request timeout,
+// per-minute rate limit, and server-side failures. Everything else (400, 403,
+// 404) is a problem with the request or key that a retry can't fix.
+const TRANSIENT_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
+const REQUEST_TIMEOUT_MS = 15_000;
+// Total time one message may spend retrying before the user gets an error.
+// Fits one wait on the ~60s retryDelay Gemini returns for a per-minute 429.
+const RETRY_BUDGET_MS = 90_000;
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
 function fetchOnce(key, body) {
   return fetch(`${BASE_ENDPOINT}?key=${key}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
+}
+
+// Sends one request on one key, retrying transient failures with exponential
+// backoff until the retry budget runs out. A network error or timeout (fetch
+// rejects) gets the same treatment as a 5xx: the request never got an answer.
+// Returns the final Response, or { perDayQuota: true } so the caller can
+// rotate to the next key.
+async function fetchWithRetry(key, body, deadline) {
+  for (let attempt = 1; ; attempt++) {
+    let res = null;
+    let failure;
+    try {
+      res = await fetchOnce(key, body);
+    } catch (err) {
+      failure = err;
+    }
+
+    let waitMs = 1000 * 2 ** (attempt - 1);
+    if (res) {
+      if (!TRANSIENT_STATUSES.has(res.status)) return res;
+      const errText = await res.text();
+      if (res.status === 429) {
+        const { retryDelaySec, isPerDay } = parseQuotaError(errText);
+        if (isPerDay) return { perDayQuota: true };
+        if (retryDelaySec > 0) waitMs = retryDelaySec * 1000 + 500;
+      }
+      failure = new Error(`Gemini API ${res.status}: ${errText}`);
+    }
+
+    if (Date.now() + waitMs > deadline) {
+      throw new Error(`Gemini request failed after ${attempt} attempt(s)`, { cause: failure });
+    }
+    logger.warn({ err: failure, attempt, waitMs }, 'Gemini request failed — retrying');
+    await sleep(waitMs);
+  }
 }
 
 // savedPlaces:         { home: 'Seresponda Court, Nairobi', work: 'Westlands, Nairobi' }
@@ -348,39 +395,20 @@ export async function parseIntent(userMessage, savedPlaces = {}, conversationHis
     throw new Error('All Gemini API keys have exhausted their daily quota. Restart the bot after midnight Pacific Time to reset.');
   }
 
-  // Try each key starting from the current keyIndex.
-  // - Per-day 429: advance keyIndex permanently and try the next key.
-  // - Per-minute 429: wait for the rate window to reset (~60s), retry same key.
-  // - 503 (server overload): wait 5s, retry same key.
+  // Try each key starting from the current keyIndex. Transient failures are
+  // retried on the same key inside fetchWithRetry; a per-day 429 advances
+  // keyIndex permanently and moves on to the next key.
+  const deadline = Date.now() + RETRY_BUDGET_MS;
   for (let i = keyIndex; i < GEMINI_KEYS.length; i++) {
-    const key = GEMINI_KEYS[i];
+    const res = await fetchWithRetry(GEMINI_KEYS[i], body, deadline);
 
-    let res = await fetchOnce(key, body);
-
-    if (res.status === 429) {
-      const errText = await res.text();
-      const { retryDelaySec, isPerDay } = parseQuotaError(errText);
-
-      if (isPerDay) {
-        keyIndex = i + 1;
-        if (i < GEMINI_KEYS.length - 1) {
-          logger.warn({ keyIndex: i + 1, total: GEMINI_KEYS.length }, 'Gemini key hit daily quota — rotating');
-          continue;
-        }
-        throw new Error(`All ${GEMINI_KEYS.length} Gemini key(s) have exhausted their daily quota.`);
+    if (res.perDayQuota) {
+      keyIndex = i + 1;
+      if (i < GEMINI_KEYS.length - 1) {
+        logger.warn({ keyIndex: i + 1, total: GEMINI_KEYS.length }, 'Gemini key hit daily quota — rotating');
+        continue;
       }
-
-      if (retryDelaySec > 0 && retryDelaySec <= 75) {
-        await new Promise(r => setTimeout(r, retryDelaySec * 1000 + 500));
-        res = await fetchOnce(key, body);
-      } else {
-        throw new Error(`Gemini API 429: ${errText}`);
-      }
-    }
-
-    if (res.status === 503) {
-      await new Promise(r => setTimeout(r, 5000));
-      res = await fetchOnce(key, body);
+      throw new Error(`All ${GEMINI_KEYS.length} Gemini key(s) have exhausted their daily quota.`);
     }
 
     if (!res.ok) {

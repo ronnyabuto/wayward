@@ -52,7 +52,7 @@ export async function handleMatatu(bot, chatId, originStr, destinationStr) {
   const destShort   = destinationStr.split(',')[0];
 
   let message = `${emoji} Matatu corridor ${originShort} → ${destShort}: ${label}\n`;
-  message += `Road traffic: ${curMin} min right now (usually ${statMin} min) — ${advice}.`;
+  message += `Road traffic: ${curMin} min right now (${statMin} min without traffic) — ${advice}.`;
 
   // If there's an alternative route that's notably less congested, surface it.
   if (routes.length > 1) {

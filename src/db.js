@@ -239,6 +239,12 @@ export function initDb() {
   );
   if (!watchCols.has('origin_place_id')) db.exec(`ALTER TABLE watches ADD COLUMN origin_place_id TEXT`);
   if (!watchCols.has('dest_place_id'))   db.exec(`ALTER TABLE watches ADD COLUMN dest_place_id TEXT`);
+  // expires_at: unix seconds; NULL only on rows from before expiry existed —
+  // loadWatchesFromDb gives those a fresh lifetime. best_min/best_at: the
+  // lowest reading seen, reported if the watch expires without firing.
+  if (!watchCols.has('expires_at')) db.exec(`ALTER TABLE watches ADD COLUMN expires_at INTEGER`);
+  if (!watchCols.has('best_min'))   db.exec(`ALTER TABLE watches ADD COLUMN best_min INTEGER`);
+  if (!watchCols.has('best_at'))    db.exec(`ALTER TABLE watches ADD COLUMN best_at INTEGER`);
 
   // Migrate memory_turns: add wing/room columns for MemPalace hierarchical retrieval.
   const memTurnCols = new Set(
@@ -341,11 +347,19 @@ export function dbGetAllWatches() {
   return db.prepare('SELECT * FROM watches').all();
 }
 
-export function dbInsertWatch(chatId, origin, destination, thresholdMinutes, originPlaceId = null, destPlaceId = null) {
+export function dbInsertWatch(chatId, origin, destination, thresholdMinutes, originPlaceId, destPlaceId, expiresAt) {
   const { lastInsertRowid } = db
-    .prepare('INSERT INTO watches (chat_id, origin, destination, threshold_min, origin_place_id, dest_place_id) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(chatId, origin, destination, thresholdMinutes, originPlaceId, destPlaceId);
+    .prepare('INSERT INTO watches (chat_id, origin, destination, threshold_min, origin_place_id, dest_place_id, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(chatId, origin, destination, thresholdMinutes, originPlaceId, destPlaceId, expiresAt);
   return Number(lastInsertRowid);
+}
+
+export function dbSetWatchExpiry(id, expiresAt) {
+  db.prepare('UPDATE watches SET expires_at = ? WHERE id = ?').run(expiresAt, id);
+}
+
+export function dbSetWatchBest(id, bestMin, bestAt) {
+  db.prepare('UPDATE watches SET best_min = ?, best_at = ? WHERE id = ?').run(bestMin, bestAt, id);
 }
 
 export function dbDeleteWatch(id) {

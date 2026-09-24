@@ -9,7 +9,7 @@
   },
   "scripts": {
     "start": "node --dns-result-order=ipv4first src/bot.js",
-    "test": "node --test test/quickClassify.test.js test/telegram.test.js",
+    "test": "node --test test/quickClassify.test.js test/telegram.test.js test/departurePlan.test.js test/geminiRetry.test.js",
     "test:golden": "RUN_GOLDEN_TESTS=1 node --test test/parseIntent.golden.test.js test/multiturn.golden.test.js",
     "test:all": "npm test && npm run test:golden"
   },

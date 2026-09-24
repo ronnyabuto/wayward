@@ -3,6 +3,7 @@ import { dbInsertWatch, dbDeleteWatch } from '../db.js';
 import { getDurationSeconds } from '../services/traffic.js';
 import { geocode, GeocodeNotFoundError } from '../utils/geocode.js';
 import { logger } from '../utils/logger.js';
+import { fmtTime } from '../utils/time.js';
 
 // Core logic — shared by the explicit /watch command and the NLP path in bot.js.
 // Geocodes origin/destination here so the scheduler can use placeId-based routing.
@@ -54,16 +55,30 @@ export async function handleWatch(bot, chatId, originStr, destinationStr, thresh
   }
 
   const watchId = commitWatch(chatId, originStr, destinationStr, threshold, origin.placeId, destination.placeId);
+  const until = fmtTime(new Date(watches.get(watchId).expiresAt * 1000));
   await bot.sendMessage(
     chatId,
-    `Watching ${originStr} → ${destinationStr}. I'll message you when the drive drops under ${threshold} min.\n\nWatch ID: #${watchId} — use /stopwatch ${watchId} to cancel.`
+    `Watching ${originStr} → ${destinationStr} until ${until}. I'll message you when the drive drops under ${threshold} min.\n\nWatch ID: #${watchId} — use /stopwatch ${watchId} to cancel.`
   );
+}
+
+// How long a watch with no deadline keeps polling. A watch answers "when can I
+// leave for this trip", which is a same-day question — long enough to outlast
+// an evening rush (roughly 5–8pm in Nairobi) from its start, short enough that
+// a threshold traffic never reaches doesn't poll the Routes API for days.
+const WATCH_LIFETIME_SEC = 4 * 60 * 60;
+
+export function defaultWatchExpiry() {
+  return Math.floor(Date.now() / 1000) + WATCH_LIFETIME_SEC;
 }
 
 // Persist a watch to DB and memory without any validation or messaging.
 // Used by handleWatch (above) and handleDepart, which already geocoded the route.
-export function commitWatch(chatId, origin, destination, threshold, originPlaceId = null, destPlaceId = null) {
-  const watchId = dbInsertWatch(chatId, origin, destination, threshold, originPlaceId, destPlaceId);
+// expiresAt (unix seconds): pass the user's deadline when there is one — an
+// alert after it is useless. Otherwise the watch gets the default lifetime.
+export function commitWatch(chatId, origin, destination, threshold, originPlaceId = null, destPlaceId = null, expiresAt = null) {
+  const expiry = expiresAt ?? defaultWatchExpiry();
+  const watchId = dbInsertWatch(chatId, origin, destination, threshold, originPlaceId, destPlaceId, expiry);
   watches.set(watchId, {
     chatId,
     origin,
@@ -71,6 +86,9 @@ export function commitWatch(chatId, origin, destination, threshold, originPlaceI
     originPlaceId,
     destPlaceId,
     thresholdMinutes: threshold,
+    expiresAt: expiry,
+    bestMin: null,
+    bestAt: null,
     failCount: 0,
     active: true,
   });
@@ -105,7 +123,7 @@ export function registerListWatches(bot) {
         await bot.sendMessage(chatId, 'You have no active watches. Start one or just tell me where you need to go.');
         return;
       }
-      const lines = active.map(([id, w]) => `#${id} — ${w.origin} → ${w.destination} (alert at ≤ ${w.thresholdMinutes} min)`);
+      const lines = active.map(([id, w]) => `#${id} — ${w.origin} → ${w.destination} (alert at ≤ ${w.thresholdMinutes} min, until ${fmtTime(new Date(w.expiresAt * 1000))})`);
       await bot.sendMessage(chatId, `Active watches:\n\n${lines.join('\n')}`);
     } catch (err) {
       logger.error({ err, chatId }, 'watches handler error');

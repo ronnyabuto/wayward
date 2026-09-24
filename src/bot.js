@@ -168,7 +168,9 @@ bot.on('message', async (msg) => {
       intent = await parseIntent(text, savedPlaces, history, activeFacts);
     } catch (err) {
       logger.error({ err, chatId }, 'Gemini intent parse error');
-      await bot.sendMessage(chatId, 'Something went wrong understanding that. Try again in a moment.');
+      // Reached only after parseIntent's retries are exhausted, so this is the
+      // service being down, not the wording — don't suggest the user rephrase.
+      await bot.sendMessage(chatId, "I couldn't reach my language service just now. Please send that again in a minute.");
       return;
     }
 

@@ -10,6 +10,14 @@ function formatHour(h) {
   return `${h - 12}pm`;
 }
 
+export function fmtTime(date) {
+  const s = date.toLocaleTimeString('en-KE', {
+    hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Africa/Nairobi',
+  });
+  // en-KE ICU data renders noon/midnight as "00:xx" instead of "12:xx" on some runtimes.
+  return s.replace(/^00:/, '12:');
+}
+
 export function getNairobiComponents(date = new Date()) {
   const d = new Date(date.getTime() + NAIROBI_OFFSET_MS);
   return {

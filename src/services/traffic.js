@@ -68,6 +68,18 @@ export async function getRouteOptions(origin, destination, departureTime = null)
   }));
 }
 
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+
+// Google's typical drive for the weekday and time of `at` — what "usual"
+// means to a commuter. A departure a week out is past anything live
+// conditions can inform, so the Routes API answers purely from its historical
+// model for that slot. staticSeconds is not a substitute: it's an empty road,
+// which busy corridors don't see all day (and quiet 3am traffic can beat it).
+// Same shape and failure behaviour as getDurationSeconds.
+export function getTypicalDuration(origin, destination, at = new Date()) {
+  return getDurationSeconds(origin, destination, new Date(at.getTime() + WEEK_MS));
+}
+
 export async function getDurationSeconds(origin, destination, departureTime = null) {
   const depTime = departureTime ?? new Date(Date.now() + 60_000);
   const body = {

@@ -2,16 +2,12 @@ import { getDurationSeconds } from './services/traffic.js';
 
 const BUFFER_MIN = 8;
 
-function fmtTime(date) {
-  const s = date.toLocaleTimeString('en-KE', {
-    hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Africa/Nairobi',
-  });
-  return s.replace(/^00:/, '12:');
-}
 import { dbGetAllWatches, dbDeleteWatch, dbSetFailCount, dbLogTraffic, dbLogTrafficPool,
-         dbGetScheduledPendingIntents, dbDeletePendingIntent } from './db.js';
-import { commitWatch } from './commands/watch.js';
+         dbGetScheduledPendingIntents, dbDeletePendingIntent,
+         dbSetWatchExpiry, dbSetWatchBest } from './db.js';
+import { commitWatch, defaultWatchExpiry } from './commands/watch.js';
 import { logger } from './utils/logger.js';
+import { fmtTime } from './utils/time.js';
 
 export const watches = new Map();
 
@@ -49,7 +45,7 @@ export function scheduleTimedWatch(bot, row) {
       if (!result) {
         // Can't reach the API — fall back to continuous polling.
         commitWatch(row.chat_id, row.origin, row.destination, row.threshold_min,
-                    row.origin_place_id ?? null, row.dest_place_id ?? null);
+                    row.origin_place_id ?? null, row.dest_place_id ?? null, row.arrive_at_sec ?? null);
         await bot.sendMessage(row.chat_id,
           `Couldn't check traffic right now — watching ${originShort} → ${destShort} and will ping you when it's time to leave.`);
         return;
@@ -71,7 +67,7 @@ export function scheduleTimedWatch(bot, row) {
       // Traffic worse than predicted — warn and start continuous polling.
       if (currentMin > row.threshold_min) {
         commitWatch(row.chat_id, row.origin, row.destination, row.threshold_min,
-                    row.origin_place_id ?? null, row.dest_place_id ?? null);
+                    row.origin_place_id ?? null, row.dest_place_id ?? null, row.arrive_at_sec ?? null);
         const depStr = latestDep ? ` Leave by ${fmtTime(latestDep)} — ${minUntilDep} min from now.` : '';
         await bot.sendMessage(row.chat_id,
           `🔴 Traffic is heavier than expected — ${originShort} → ${destShort} is ${currentMin} min.${depStr} I'll ping you when it eases.`);
@@ -101,6 +97,13 @@ export function loadScheduledPendingIntents(bot) {
 
 export function loadWatchesFromDb() {
   for (const row of dbGetAllWatches()) {
+    // Rows created before watches had an expiry get a fresh lifetime from now
+    // rather than being dropped unannounced or polling forever.
+    let expiresAt = row.expires_at;
+    if (expiresAt === null) {
+      expiresAt = defaultWatchExpiry();
+      dbSetWatchExpiry(row.id, expiresAt);
+    }
     watches.set(row.id, {
       chatId:          row.chat_id,
       origin:          row.origin,
@@ -108,6 +111,9 @@ export function loadWatchesFromDb() {
       originPlaceId:   row.origin_place_id ?? null,
       destPlaceId:     row.dest_place_id   ?? null,
       thresholdMinutes: row.threshold_min,
+      expiresAt,
+      bestMin:         row.best_min ?? null,
+      bestAt:          row.best_at ?? null,
       failCount:       row.fail_count,
       active:          true,
     });
@@ -158,6 +164,11 @@ async function pollAllWatches(bot) {
 }
 
 async function checkWatch(bot, watchId, watch) {
+  if (Date.now() / 1000 >= watch.expiresAt) {
+    await expireWatch(bot, watchId, watch);
+    return;
+  }
+
   // Prefer placeId-based routing (more accurate access-point resolution);
   // fall back to the stored address string for watches created before this migration.
   const routeOrigin = watch.originPlaceId ? { placeId: watch.originPlaceId } : watch.origin;
@@ -176,6 +187,12 @@ async function checkWatch(bot, watchId, watch) {
   }
 
   const minutes = Math.round(result.seconds / 60);
+  if (watch.bestMin === null || minutes < watch.bestMin) {
+    watch.bestMin = minutes;
+    watch.bestAt  = Math.floor(Date.now() / 1000);
+    dbSetWatchBest(watchId, watch.bestMin, watch.bestAt);
+  }
+
   if (minutes <= watch.thresholdMinutes) {
     watch.active = false;
     watches.delete(watchId);
@@ -185,4 +202,21 @@ async function checkWatch(bot, watchId, watch) {
       `🟢 Leave now. ${watch.origin} → ${watch.destination} is ${minutes} min right now.`
     );
   }
+}
+
+// Ends a watch whose threshold was never met in its lifetime, and says so —
+// silently dropping it would leave the user still waiting for an alert.
+async function expireWatch(bot, watchId, watch) {
+  watch.active = false;
+  watches.delete(watchId);
+  dbDeleteWatch(watchId);
+
+  const route = `${watch.origin.split(',')[0]} → ${watch.destination.split(',')[0]}`;
+  const best = watch.bestMin !== null
+    ? ` The best I saw was ${watch.bestMin} min at ${fmtTime(new Date(watch.bestAt * 1000))}.`
+    : '';
+  await bot.sendMessage(
+    watch.chatId,
+    `Stopped watching ${route} — it didn't drop under ${watch.thresholdMinutes} min.${best} Ask me again if you still need to go.`
+  );
 }

@@ -4,12 +4,6 @@ import { dbLogTraffic, dbGetPersonalTypical, dbLogDeparture, dbLogTrafficPool, d
 import { getNairobiComponents } from '../utils/time.js';
 import { logger } from '../utils/logger.js';
 
-function congestionLabel(ratio) {
-  if (ratio >= 1.4)  return 'heavy';
-  if (ratio >= 1.15) return 'moderate';
-  return 'clear';
-}
-
 // userId: the individual user's id (differs from chatId when called from a group).
 // Used for personal traffic history and baselines. Defaults to chatId for private chats.
 export async function handleCheck(bot, chatId, originStr, destinationStr, userId = null) {
@@ -67,11 +61,13 @@ export async function handleCheck(bot, chatId, originStr, destinationStr, userId
 
   if (routes.length === 1) {
     const minutes    = Math.round(primary.seconds / 60);
-    const typicalMin = Math.round(primary.staticSeconds / 60);
-    const diff       = minutes - typicalMin;
-    const trafficCtx = diff <= -3 ? ` — ${Math.abs(diff)} min faster than usual`
-      : diff >= 3 ? ` — ${diff} min slower than usual`
-      : ` — about normal`;
+    // staticSeconds is the no-traffic time, so this is the delay traffic adds —
+    // not a comparison with a usual drive at this hour (that's personal/pool below).
+    const freeFlowMin = Math.round(primary.staticSeconds / 60);
+    const delay       = minutes - freeFlowMin;
+    const trafficCtx  = delay >= 3
+      ? ` — ${delay} min of traffic delay (${freeFlowMin} min on an empty road)`
+      : ` — roads are clear`;
 
     let message = `${originShort} → ${destShort} is ${minutes} min right now${trafficCtx}.`;
 
@@ -98,8 +94,10 @@ export async function handleCheck(bot, chatId, originStr, destinationStr, userId
   const options = routes.map((r, i) => {
     const min      = Math.round(r.seconds / 60);
     const statMin  = Math.round(r.staticSeconds / 60);
-    const ratio    = r.seconds / r.staticSeconds;
-    const cond     = congestionLabel(ratio);
+    // The delay over an empty road, stated as a number: a ratio-based "heavy"
+    // called ordinary Nairobi daytime traffic heavy on every busy corridor.
+    const delay    = min - statMin;
+    const cond     = delay >= 3 ? `${delay} min of traffic delay` : 'clear';
     const label    = r.description ? `Via ${r.description}` : i === 0 ? 'Direct' : `Option ${i + 1}`;
     return { min, statMin, cond, label };
   });
@@ -109,7 +107,7 @@ export async function handleCheck(bot, chatId, originStr, destinationStr, userId
 
   let message = `${originShort} → ${destShort} right now:\n`;
   for (const o of options) {
-    message += `• ${o.label}: ${o.min} min (usually ${o.statMin} min) — ${o.cond}\n`;
+    message += `• ${o.label}: ${o.min} min (${o.statMin} min without traffic) — ${o.cond}\n`;
   }
 
   if (saving >= 3) {
